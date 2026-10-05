@@ -12,12 +12,12 @@ import {loadConfig} from '../src/config.mjs';
 async function cfg(t){
  const root=await realpath(await mkdtemp(join(tmpdir(),'claude-mcp-transport-')));t.after(()=>rm(root,{recursive:true,force:true}));
  const file=join(root,'cli');await writeFile(file,'#!/usr/bin/env node\nlet p="";process.stdin.on("data",c=>p+=c);process.stdin.on("end",()=>console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,result:"answer:"+p})));',{mode:0o755});
- return loadConfig({...process.env,CLAUDE_MCP_WORKSPACE:root,CLAUDE_MCP_COMMAND:file,CLAUDE_MCP_MODELS:'gateway/model-a,gateway/model-b',ANTHROPIC_BASE_URL:'',PORT:'0'});
+ return loadConfig({...process.env,CLAUDE_MCP_WORKSPACE:root,CLAUDE_MCP_JOB_DIR:join(root,'state'),CLAUDE_MCP_COMMAND:file,CLAUDE_MCP_MODELS:'gateway/model-a,gateway/model-b',ANTHROPIC_BASE_URL:'',PORT:'0'});
 }
 test('HTTP initialization, two tools, configured models and completed ask',async t=>{
  const config=await cfg(t);const app=await startHttp(config);t.after(()=>app.close());
  const client=new Client({name:'test',version:'1'});await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));t.after(()=>client.close());
- assert.deepEqual((await client.listTools()).tools.map(t=>t.name),['models','ask']);
+ assert.deepEqual((await client.listTools()).tools.map(t=>t.name),['models','ask','start_job','get_job','list_jobs','cancel_job']);
  assert.equal((await client.callTool({name:'models',arguments:{}})).structuredContent.source,'configured');
  const answer=await client.callTool({name:'ask',arguments:{prompt:'hello',model:'custom/anything'}});
  assert.equal(answer.structuredContent.answer,'answer:hello');
@@ -25,9 +25,9 @@ test('HTTP initialization, two tools, configured models and completed ask',async
  const bad=await client.callTool({name:'ask',arguments:{prompt:'hello',cwd:'missing'}});assert.equal(bad.isError,true);
 });
 test('STDIO is protocol-only and supports the same tools',async t=>{
- const config=await cfg(t);const transport=new StdioClientTransport({command:process.execPath,args:['src/main.mjs','--transport','stdio'],cwd:process.cwd(),env:{...process.env,CLAUDE_MCP_WORKSPACE:config.root,CLAUDE_MCP_COMMAND:config.command,CLAUDE_MCP_MODELS:'sonnet',ANTHROPIC_BASE_URL:''},stderr:'pipe'});
+ const config=await cfg(t);const transport=new StdioClientTransport({command:process.execPath,args:['src/main.mjs','--transport','stdio'],cwd:process.cwd(),env:{...process.env,CLAUDE_MCP_WORKSPACE:config.root,CLAUDE_MCP_JOB_DIR:join(config.root,'stdio-state'),CLAUDE_MCP_COMMAND:config.command,CLAUDE_MCP_MODELS:'sonnet',ANTHROPIC_BASE_URL:''},stderr:'pipe'});
  const client=new Client({name:'stdio-test',version:'1'});await client.connect(transport);t.after(()=>client.close());
- assert.equal((await client.listTools()).tools.length,2);
+ assert.equal((await client.listTools()).tools.length,6);
  assert.equal((await client.callTool({name:'ask',arguments:{prompt:'stdio'}})).structuredContent.answer,'answer:stdio');
 });
 test('optional MCP auth and host validation guard HTTP',async t=>{
@@ -42,36 +42,27 @@ test('foreign browser Origin cannot invoke unauthenticated MCP',async t=>{
  assert.equal((await fetch(`http://127.0.0.1:${app.port}/mcp`,{method:'POST',headers:{Origin:'https://evil.example','content-type':'application/json'},body:'{}'})).status,403);
 });
 
-test('HTTP disconnect and service shutdown terminate running Claude processes',async t=>{
- const config=await cfg(t);
- await writeFile(config.command,'#!/usr/bin/env node\nrequire("fs").writeFileSync("active-pid",String(process.pid));setInterval(()=>{},1000);',{mode:0o755});
- const {readFile}=await import('node:fs/promises');
- for(const kind of ['disconnect','shutdown']){
-  const app=await startHttp(config);const controller=new AbortController();
-  const init=await fetch(`http://127.0.0.1:${app.port}/mcp`,{method:'POST',headers:{'content-type':'application/json',Accept:'application/json, text/event-stream'},body:JSON.stringify({jsonrpc:'2.0',id:0,method:'initialize',params:{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'disconnect-test',version:'1'}}})});
-  const session=init.headers.get('mcp-session-id');await init.text();
-  const pending=fetch(`http://127.0.0.1:${app.port}/mcp`,{method:'POST',signal:controller.signal,headers:{'content-type':'application/json',Accept:'application/json, text/event-stream','MCP-Protocol-Version':'2025-03-26','Mcp-Session-Id':session},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'ask',arguments:{prompt:'wait'}}})}).then(async r=>{await r.text();}).catch(()=>{});
-  let pid;
-  for(let i=0;i<50;i++){try{pid=Number(await readFile(join(config.root,'active-pid'),'utf8'));break;}catch{await new Promise(r=>setTimeout(r,10));}}
-  assert.ok(pid,'CLI started');
-  if(kind==='disconnect')controller.abort();else await app.close();
-  await pending;
-  let alive=true;for(let i=0;i<50;i++){try{process.kill(pid,0);await new Promise(r=>setTimeout(r,10));}catch(e){if(e.code==='ESRCH'){alive=false;break;}throw e;}}
-  assert.equal(alive,false,kind+' must stop CLI');
-  await app.close();await rm(join(config.root,'active-pid'));
- }
+test('HTTP ask disconnect leaves job running and recoverable across sessions',async t=>{
+ const config=await cfg(t);await writeFile(config.command,'#!/usr/bin/env node\nsetTimeout(()=>console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,result:"survived"})),200);',{mode:0o755});
+ const app=await startHttp(config);t.after(()=>app.close());
+ const client=new Client({name:'detach-test',version:'1'});await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));
+ const receipt=(await client.callTool({name:'ask',arguments:{prompt:'wait',wait_ms:0}})).structuredContent;
+ assert.equal(receipt.status,'working');await client.close();
+ const next=new Client({name:'recover-test',version:'1'});await next.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));t.after(()=>next.close());
+ const done=(await next.callTool({name:'get_job',arguments:{job_id:receipt.job_id,wait_ms:1000}})).structuredContent;
+ assert.equal(done.status,'completed');assert.equal(done.result.answer,'survived');
 });
-
-test('SDK deadline cancellation stops the original HTTP Claude call',async t=>{
- const config=await cfg(t);
- await writeFile(config.command,'#!/usr/bin/env node\nrequire("fs").writeFileSync("cancel-pid",String(process.pid));setInterval(()=>{},1000);',{mode:0o755});
- const {readFile}=await import('node:fs/promises');
+test('SDK deadline cancels wait only; explicit cancel_job stops generation',async t=>{
+ const config=await cfg(t);await writeFile(config.command,'#!/usr/bin/env node\nrequire("fs").writeFileSync("async-pid",String(process.pid));setInterval(()=>{},1000);',{mode:0o755});
  const app=await startHttp(config);t.after(()=>app.close());
  const client=new Client({name:'cancel-test',version:'1'});await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));t.after(()=>client.close());
- await assert.rejects(client.callTool({name:'ask',arguments:{prompt:'wait'}},undefined,{timeout:150}));
- const pid=Number(await readFile(join(config.root,'cancel-pid'),'utf8'));
- let alive=true;for(let i=0;i<50;i++){try{process.kill(pid,0);await new Promise(r=>setTimeout(r,10));}catch(e){if(e.code==='ESRCH'){alive=false;break;}throw e;}}
- assert.equal(alive,false,'SDK cancellation must stop CLI without client.close');
+ await assert.rejects(client.callTool({name:'ask',arguments:{prompt:'wait',wait_ms:1000}},undefined,{timeout:100}));
+ const listed=(await client.callTool({name:'list_jobs',arguments:{}})).structuredContent.jobs;
+ assert.equal(listed[0].status,'working');
+ const cancelled=(await client.callTool({name:'cancel_job',arguments:{job_id:listed[0].job_id}})).structuredContent;
+ assert.equal(cancelled.status,'cancelled');
+ const {readFile}=await import('node:fs/promises');const pid=Number(await readFile(join(config.root,'async-pid'),'utf8'));
+ assert.throws(()=>process.kill(pid,0),e=>e.code==='ESRCH');
 });
 
 test('repeated reconnects do not exhaust idle session capacity',async t=>{
@@ -79,7 +70,7 @@ test('repeated reconnects do not exhaust idle session capacity',async t=>{
  for(let i=0;i<66;i++){
   const client=new Client({name:'reconnect-test',version:'1'});
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));
-  assert.equal((await client.listTools()).tools.length,2);await client.close();
+  assert.equal((await client.listTools()).tools.length,6);await client.close();
  }
 });
 
