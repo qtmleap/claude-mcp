@@ -5,7 +5,7 @@ function integer(env,key,fallback,min,max) {
   return n;
 }
 export function loadConfig(env=process.env) {
-  const root=resolve(env.CLAUDE_MCP_WORKSPACE||'/Users/devonly/Developer');
+  const root=resolve(env.CLAUDE_MCP_WORKSPACE||process.cwd());
   const permissionMode=env.CLAUDE_MCP_PERMISSION_MODE||'acceptEdits';
   if(!['manual','default','acceptEdits','dontAsk','plan','auto','bypassPermissions'].includes(permissionMode)) throw new Error('Invalid CLAUDE_MCP_PERMISSION_MODE');
   return {env:{...env},root,command:env.CLAUDE_MCP_COMMAND||'claude',
