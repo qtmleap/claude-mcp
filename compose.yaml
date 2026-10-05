@@ -1,0 +1,35 @@
+services:
+  claude-mcp:
+    build:
+      context: .
+    image: claude-mcp:local
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8877
+      CLAUDE_MCP_WORKSPACE: /workspace
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_CUSTOM_HEADERS: ${ANTHROPIC_CUSTOM_HEADERS:-}
+      CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID:-}
+      CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET:-}
+      CLAUDE_MCP_MODELS: ${CLAUDE_MCP_MODELS:-sonnet,opus,haiku}
+      CLAUDE_MCP_TOKEN: ${CLAUDE_MCP_TOKEN:-}
+      CLAUDE_MCP_PERMISSION_MODE: ${CLAUDE_MCP_PERMISSION_MODE:-acceptEdits}
+      CLAUDE_MCP_ALLOWED_TOOLS: ${CLAUDE_MCP_ALLOWED_TOOLS:-Read,Grep,Glob}
+      CLAUDE_MCP_TIMEOUT_MS: ${CLAUDE_MCP_TIMEOUT_MS:-300000}
+    ports:
+      - '127.0.0.1:${CLAUDE_MCP_PORT:-8877}:8877'
+    volumes:
+      - type: bind
+        source: ${CLAUDE_MCP_HOST_WORKSPACE:-.}
+        target: /workspace
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ['CMD', 'node', '-e', 'fetch("http://127.0.0.1:8877/healthz").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    stop_grace_period: 10s
+    restart: unless-stopped
