@@ -37,6 +37,7 @@ export function createMcp(config, lifecycleSignal, requestSignals, sharedJobs) {
   try{const job=await jobs.start(args);const result=await jobs.get(job.job_id,Math.min(args.wait_ms??args.timeout_ms??config.waitMs??10000,30000));
    if(result.status==='completed')return success(result.result);
    if(result.status==='failed')return failed(Object.assign(new Error(result.error?.message||'Claude failed'),result.error),config);
+   if(result.status==='cancelled')return failed(Object.assign(new Error('Job was cancelled'),{code:'cancelled',details:{job_id:result.job_id,status:'cancelled'}}),config);
    return success(result);
   }catch(e){return failed(e,config);}
  });

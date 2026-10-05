@@ -109,3 +109,38 @@ test('delete_job over MCP removes terminal jobs, rejects active ones; list_jobs 
  const again=await client.callTool({name:'delete_job',arguments:{job_id:listed[0].job_id}});
  assert.equal(again.isError,true);assert.equal(again.structuredContent.error.code,'not_found');
 });
+
+test('two STDIO processes sharing a state directory stay isolated',async t=>{
+ const config=await cfg(t);await writeFile(config.command,'#!/usr/bin/env node\nsetInterval(()=>{},1000);',{mode:0o755});
+ const {readdir}=await import('node:fs/promises');const shared=join(config.root,'shared-state');
+ const connect=async name=>{
+  const transport=new StdioClientTransport({command:process.execPath,args:['src/main.mjs','--transport','stdio'],cwd:process.cwd(),env:{...process.env,CLAUDE_MCP_WORKSPACE:config.root,CLAUDE_MCP_JOB_DIR:shared,CLAUDE_MCP_COMMAND:config.command,CLAUDE_MCP_MODELS:'sonnet',ANTHROPIC_BASE_URL:''},stderr:'pipe'});
+  const client=new Client({name,version:'1'});await client.connect(transport);t.after(()=>client.close());return client;
+ };
+ const a=await connect('stdio-a');
+ const receiptA=(await a.callTool({name:'ask',arguments:{prompt:'a',wait_ms:0}})).structuredContent;assert.equal(receiptA.status,'working');
+ const b=await connect('stdio-b');
+ const receiptB=(await b.callTool({name:'start_job',arguments:{prompt:'b'}})).structuredContent;
+ const listB=(await b.callTool({name:'list_jobs',arguments:{}})).structuredContent.jobs.map(j=>j.job_id);
+ assert.deepEqual(listB,[receiptB.job_id]);
+ const foreign=await b.callTool({name:'cancel_job',arguments:{job_id:receiptA.job_id}});assert.equal(foreign.isError,true);
+ assert.equal((await a.callTool({name:'get_job',arguments:{job_id:receiptA.job_id}})).structuredContent.status,'working');
+ assert.equal((await a.callTool({name:'list_jobs',arguments:{}})).structuredContent.jobs.length,1);
+ const runs=await readdir(join(shared,'stdio'));assert.equal(runs.length,2);
+ assert.equal((await a.callTool({name:'cancel_job',arguments:{job_id:receiptA.job_id}})).structuredContent.status,'cancelled');
+ assert.equal((await b.callTool({name:'get_job',arguments:{job_id:receiptB.job_id}})).structuredContent.status,'working');
+ await b.callTool({name:'cancel_job',arguments:{job_id:receiptB.job_id}});
+});
+
+test('ask cancelled by another HTTP session is an MCP error with job_id; get_job stays a snapshot',async t=>{
+ const config=await cfg(t);await writeFile(config.command,'#!/usr/bin/env node\nsetInterval(()=>{},1000);',{mode:0o755});
+ const app=await startHttp(config);t.after(()=>app.close());
+ const mk=async name=>{const c=new Client({name,version:'1'});await c.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));t.after(()=>c.close());return c;};
+ const a=await mk('ask-a'),b=await mk('ask-b');
+ const pending=a.callTool({name:'ask',arguments:{prompt:'wait',wait_ms:20000}});
+ let id;for(let i=0;i<100&&!id;i++){await new Promise(r=>setTimeout(r,50));id=(await b.callTool({name:'list_jobs',arguments:{}})).structuredContent.jobs[0]?.job_id;}
+ assert.ok(id);await b.callTool({name:'cancel_job',arguments:{job_id:id}});
+ const ask=await pending;assert.equal(ask.isError,true);
+ assert.equal(ask.structuredContent.error.code,'cancelled');assert.equal(ask.structuredContent.error.details.job_id,id);
+ const got=await b.callTool({name:'get_job',arguments:{job_id:id}});assert.notEqual(got.isError,true);assert.equal(got.structuredContent.status,'cancelled');
+});
