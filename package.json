@@ -1,0 +1,21 @@
+{
+  "name": "claude-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Thin MCP wrapper for Claude Code, over stdio and Streamable HTTP",
+  "scripts": {
+    "start": "node src/main.mjs --transport http",
+    "stdio": "node src/main.mjs --transport stdio",
+    "test": "node --test test/*.test.mjs",
+    "verify": "node scripts/verify.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.0",
+    "express": "4.22.3",
+    "zod": "4.6.5"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
