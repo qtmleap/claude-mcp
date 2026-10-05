@@ -7,9 +7,15 @@ An MCP server that runs [Claude Code](https://code.claude.com/docs/en/overview) 
 | Tool | Inputs | Output |
 | --- | --- | --- |
 | `models` | None | Model identifiers, discovery source and the server's workspace context |
-| `ask` | `prompt`; optional `model`, `cwd`, `timeout_ms` | Claude's completed answer, resolved cwd and available execution metadata |
+| `ask` | `prompt`; optional `model`, `cwd`, `wait_ms`, `idempotency_key`, `execution_timeout_ms` | Quick completed answer or recoverable job receipt |
+| `start_job` | Same inputs as `ask` | Immediate `job_id` and status |
+| `get_job` | `job_id`; optional `wait_ms` (0–30000) | Safe assistant progress, terminal result or error |
+| `list_jobs` | None | Retained jobs, without prompts |
+| `cancel_job` | `job_id` | Explicit process-group cancellation; terminal results remain unchanged |
 
-`ask` starts one `claude -p --output-format json` process and waits for its final result. Each call is independent; sessions are not resumed. CLI errors and permission denials are returned as MCP tool errors.
+`ask` starts an independent job and waits at most 30 seconds. A quick answer keeps the original answer shape. Longer work returns `job_id` with `working`; poll `get_job` until `completed`, `failed`, or `cancelled`. `start_job` returns immediately. CLI errors and permission denials remain errors. Generation has no default wall-clock deadline.
+
+Use a stable `idempotency_key` when starting work that could have side effects. An identical retry returns the original job; a conflicting request is rejected. After an uncertain receipt, inspect `list_jobs` before resubmitting. Jobs are shared across HTTP protocol sessions. Closing a session or cancelling a wait does not stop generation.
 
 ## Install and run
 
@@ -129,7 +135,11 @@ By default, `acceptEdits` permits file edits and `Read,Grep,Glob` are explicitly
 
 MCP authentication is optional: set `CLAUDE_MCP_TOKEN` to require a bearer token on `/mcp`. Host and browser Origin checks protect the local endpoint. External hosting requires its own access controls and frontend configuration.
 
-Cancellation, disconnect, shutdown and timeout terminate the Claude process group; same-group descendants are also cleaned up after normal exit. A failed or unconfirmed response can follow a file operation, so do not automatically retry it. The server does not provide a background-service API.
+Only `cancel_job`, an explicitly supplied `execution_timeout_ms`, or server shutdown terminates generation. Request deadlines and transport disconnects only stop waiting. Shutdown cleans up owned process groups and persists active jobs as `failed` with `interrupted` and execution uncertainty; restart never reruns them. Same-group descendants are cleaned up on normal exit.
+
+Each state directory must have one server process owner. Do not launch another HTTP or STDIO server against the same directory while the first is running; give independent STDIO instances a separate `CLAUDE_MCP_JOB_DIR`.
+
+Snapshots retain redacted assistant text and final results, never prompts, hidden thinking, tool inputs or tool results. Atomic snapshots use private directory/file permissions (0700/0600). Native HTTP state defaults to `~/.local/state/claude-mcp/jobs`; standalone STDIO uses a `stdio` subdirectory under the configured state directory to avoid clashing with HTTP. Docker uses `/var/lib/claude-mcp/jobs` on the included `claude-mcp-state` named volume. Retention is seven days and capacity 128 retained jobs / 4 concurrent jobs by default. Expired terminal files are removed on subsequent operations. A full store rejects new work rather than evicting running jobs.
 
 ## Configuration
 
@@ -144,7 +154,11 @@ Cancellation, disconnect, shutdown and timeout terminate the Claude process grou
 | `CLAUDE_MCP_MOUNTED_ROOTS` | Workspace | Comma-separated accessible workspace roots |
 | `CLAUDE_MCP_MODELS` | empty | Explicit fallback model IDs or Claude aliases |
 | `CLAUDE_MCP_COMMAND` | `claude` | CLI executable |
-| `CLAUDE_MCP_TIMEOUT_MS` | `300000` | Default ask timeout |
+| `CLAUDE_MCP_WAIT_MS` | `10000` | Default bounded ask wait, capped at 30000 ms |
+| `CLAUDE_MCP_JOB_DIR` | Native state directory | Private durable snapshot directory |
+| `CLAUDE_MCP_MAX_JOBS` | `128` | Maximum retained jobs |
+| `CLAUDE_MCP_MAX_CONCURRENT_JOBS` | `4` | Maximum running jobs |
+| `CLAUDE_MCP_JOB_RETENTION_MS` | `604800000` | Terminal result retention |
 | `CLAUDE_MCP_MAX_OUTPUT_BYTES` | `1048576` | Combined CLI output and per-page model response limit |
 | `CLAUDE_MCP_MODELS_TIMEOUT_MS` | `10000` | Model-discovery deadline |
 | `CLAUDE_MCP_PERMISSION_MODE` | `acceptEdits` | CLI permission mode |
@@ -154,9 +168,9 @@ Cancellation, disconnect, shutdown and timeout terminate the Claude process grou
 | `CLAUDE_MCP_HOST_WORKSPACE` | `.` | Compose-only host bind source |
 | `CLAUDE_MCP_PORT` | `8877` | Compose-only published host port |
 
-`ask.timeout_ms` can override the timeout up to 30 minutes. Model discovery queries `/v1/models` (or `/models` for a base ending in `/v1`), supports bounded pagination and rejects redirects. If unavailable, only the explicit `CLAUDE_MCP_MODELS` list is returned with `source: configured` and a reason. `ask.model` accepts any model identifier supported by your gateway.
+`ask.timeout_ms` is a deprecated wait alias, clamped to 30 seconds; it no longer kills generation. The legacy `CLAUDE_MCP_TIMEOUT_MS` environment setting is likewise a wait alias if `CLAUDE_MCP_WAIT_MS` is absent. Use `execution_timeout_ms` only when an actual execution deadline is intended. Polling waits should stay below the client request deadline. Model discovery queries `/v1/models` (or `/models` for a base ending in `/v1`), supports bounded pagination and rejects redirects. If unavailable, only the explicit `CLAUDE_MCP_MODELS` list is returned with `source: configured` and a reason. `ask.model` accepts any model identifier supported by your gateway.
 
-HTTP initialization returns an MCP session ID used for later requests and cancellation notifications. Sessions are bounded to 64 with idle expiry/eviction; in-flight calls are never evicted. Reinitialize an expired idle session. JSON-RPC batches are rejected before execution.
+HTTP initialization returns an MCP session ID used for later requests. Cancellation notifications stop request waiting only; use `cancel_job` to stop generation. Sessions are bounded to 64 with idle expiry/eviction; in-flight calls are never evicted. Reinitialize an expired idle session. JSON-RPC batches are rejected before execution.
 
 ## Development and verification
 

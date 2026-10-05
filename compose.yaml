@@ -17,10 +17,12 @@ services:
       CLAUDE_MCP_TOKEN: ${CLAUDE_MCP_TOKEN:-}
       CLAUDE_MCP_PERMISSION_MODE: ${CLAUDE_MCP_PERMISSION_MODE:-acceptEdits}
       CLAUDE_MCP_ALLOWED_TOOLS: ${CLAUDE_MCP_ALLOWED_TOOLS:-Read,Grep,Glob}
-      CLAUDE_MCP_TIMEOUT_MS: ${CLAUDE_MCP_TIMEOUT_MS:-300000}
+      CLAUDE_MCP_WAIT_MS: ${CLAUDE_MCP_WAIT_MS:-10000}
+      CLAUDE_MCP_JOB_DIR: /var/lib/claude-mcp/jobs
     ports:
       - '127.0.0.1:${CLAUDE_MCP_PORT:-8877}:8877'
     volumes:
+      - claude-mcp-state:/var/lib/claude-mcp
       - type: bind
         source: ${CLAUDE_MCP_HOST_WORKSPACE:-.}
         target: /workspace
@@ -33,3 +35,6 @@ services:
       retries: 12
     stop_grace_period: 10s
     restart: unless-stopped
+
+volumes:
+  claude-mcp-state:

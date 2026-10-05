@@ -2,6 +2,7 @@ import {StdioServerTransport} from '@modelcontextprotocol/sdk/server/stdio.js';
 import {loadConfig} from './config.mjs';
 import {createMcp,startHttp} from './server.mjs';
 import {redact} from './runner.mjs';
+import {join} from 'node:path';
 
 const argv=process.argv.slice(2);
 const transport=argv[0]==='--transport'?argv[1]:'stdio';
@@ -18,6 +19,7 @@ process.on('SIGTERM',()=>void close());process.on('SIGINT',()=>void close());
 try{
  const config=loadConfig();
  if(transport==='stdio'){
+  config.stateDir=join(config.stateDir,'stdio');
   runtime=createMcp(config,shutdown.signal);await runtime.connect(new StdioServerTransport());
   process.stdin.on('end',()=>void close());
  }else{
