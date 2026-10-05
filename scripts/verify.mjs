@@ -17,7 +17,7 @@ async function completed(result){let value=data(result);while(value.job_id&&valu
 function data(result){assert.ok(!result.isError,result.content?.[0]?.text);return result.structuredContent;}
 try{
  await client.connect(transport);
- const names=(await client.listTools()).tools.map(t=>t.name);assert.deepEqual(names,['models','ask','start_job','get_job','list_jobs','cancel_job']);
+ const names=(await client.listTools()).tools.map(t=>t.name);assert.deepEqual(names,['models','ask','start_job','get_job','list_jobs','cancel_job','delete_job']);
  const list=data(await client.callTool({name:'models',arguments:{}}));assert.ok(list.models.length);
  console.log(JSON.stringify({transport:mode,tools:names,models_source:list.source,models:list.models.map(x=>x.id),execution_context:list.execution_context,warning:list.warning}));
  const marker=mode==='http'?'CLAUDE_MCP_HTTP_OK':'CLAUDE_MCP_STDIO_OK';

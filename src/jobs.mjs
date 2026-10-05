@@ -46,7 +46,7 @@ export class JobStore {
       if (entry.job.idempotency?.key_hash) this.#keys.set(entry.job.idempotency.key_hash, entry);
     }
     await Promise.all([...this.#jobs.values()].map(e => e.chain));
-    await this.#purge();
+    this.#purge();
   }
 
   #entry(job) {
@@ -70,6 +70,12 @@ export class JobStore {
     return structuredClone({ job_id, status, created_at, updated_at, model, cwd, partial_answer, result, error });
   }
 
+  // Lightweight listing entry: no partial_answer/result/error bodies (each up to maxOutput); use get for those.
+  #summary({ job }) {
+    const { job_id, status, created_at, updated_at, model, cwd, error } = job;
+    return { job_id, status, created_at, updated_at, model, cwd, error_code: error?.code ?? null };
+  }
+
   // Writes are serialized per job; queued writes coalesce and always persist the latest state.
   #persist(entry) {
     if (entry.step && !entry.started) return entry.step;
@@ -89,7 +95,7 @@ export class JobStore {
     return step;
   }
 
-  async #purge() {
+  #purge() {
     const cutoff = Date.now() - this.#retentionMs;
     for (const [id, entry] of [...this.#jobs]) {
       if (!TERMINAL.has(entry.job.status) || timeOf(entry.job) > cutoff) continue;
@@ -124,9 +130,9 @@ export class JobStore {
     if (this.#closing) throw new JobError('closed', 'Job store is closed');
     await this.ready();
     const cwd = await resolveCwd(args.cwd, this.#config.root, this.#config.mountedRoots ?? [this.#config.root]);
-    // Everything below is synchronous so concurrent starts cannot interleave.
+    // No await between here and registering the job, so concurrent starts, deletes and purges cannot interleave.
     if (this.#closing) throw new JobError('closed', 'Job store is closed');
-    await this.#purge();
+    this.#purge();
     const fingerprint = sha256(JSON.stringify([args.prompt, args.model ?? null, cwd, args.execution_timeout_ms ?? null]));
     const keyHash = args.idempotency_key == null ? null : sha256(String(args.idempotency_key));
     if (keyHash) {
@@ -176,7 +182,7 @@ export class JobStore {
   }
 
   async get(id, wait_ms = 0) {
-    await this.ready(); await this.#purge();
+    await this.ready(); this.#purge();
     const entry = this.#jobs.get(id);
     if (!entry) throw new JobError('not_found', 'Unknown job_id');
     const wait = Math.min(Math.max(Number(wait_ms) || 0, 0), MAX_WAIT_MS);
@@ -192,8 +198,8 @@ export class JobStore {
   }
 
   async list() {
-    await this.ready(); await this.#purge();
-    return [...this.#jobs.values()].map(e => this.#snapshot(e)).sort((a, b) => a.created_at.localeCompare(b.created_at));
+    await this.ready(); this.#purge();
+    return [...this.#jobs.values()].map(e => this.#summary(e)).sort((a, b) => a.created_at.localeCompare(b.created_at));
   }
 
   async cancel(id) {
@@ -207,6 +213,29 @@ export class JobStore {
       await entry.chain;
     }
     return this.#snapshot(entry);
+  }
+
+  // Deletes only terminal jobs. Capacity and the idempotency key are released synchronously; the snapshot is
+  // unlinked after queued persistence so a late write cannot resurrect it.
+  async delete(id) {
+    await this.ready();
+    const entry = this.#jobs.get(id);
+    if (!entry) throw new JobError('not_found', 'Unknown job_id');
+    if (!TERMINAL.has(entry.job.status)) throw new JobError('job_active', 'Job is still working; cancel_job it before deleting');
+    this.#jobs.delete(id);
+    const key = entry.job.idempotency?.key_hash;
+    const ownsKey = key && this.#keys.get(key) === entry;
+    if (ownsKey) this.#keys.delete(key);
+    try {
+      await entry.chain;
+      await unlink(join(this.#dir, `${id}.json`)).catch(error => { if (error?.code !== 'ENOENT') throw error; });
+    } catch (error) {
+      // The snapshot may survive and resurrect on restart: keep the job visible so the caller can retry.
+      this.#jobs.set(id, entry);
+      if (ownsKey && !this.#keys.has(key)) this.#keys.set(key, entry);
+      throw error;
+    }
+    return { job_id: id, deleted: true };
   }
 
   close() {
