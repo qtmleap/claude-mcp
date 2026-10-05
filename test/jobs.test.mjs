@@ -294,3 +294,80 @@ test('permission denial clears accumulated partial answer from retained error re
  calls[0].reject(new RunnerError('permission_denied','tool denied',{tool_names:['Bash']}));
  const done=await store.get(job.job_id,1000);assert.equal(done.status,'failed');assert.equal(done.partial_answer,'');
 });
+
+test('list returns lightweight summaries; get stays full', async t => {
+  const { config } = await setup(t);
+  const { run, calls } = fakeRun();
+  const store = await open(t, config, run);
+  const a = await store.start({ prompt: 'a' });
+  await sleep(10);
+  calls[0].options.onProgress({ partial_answer: 'partial text' });
+  const [item] = await store.list();
+  assert.deepEqual(Object.keys(item).sort(), ['created_at','cwd','error_code','job_id','model','status','updated_at']);
+  assert.equal(item.job_id, a.job_id);
+  assert.equal((await store.get(a.job_id)).partial_answer, 'partial text');
+});
+
+test('delete_job rejects active jobs, frees capacity, and returns not_found afterwards', async t => {
+  const { config } = await setup(t, { maxJobs: 1 });
+  const { run, calls } = fakeRun();
+  const store = await open(t, config, run);
+  const a = await store.start({ prompt: 'a' });
+  await assert.rejects(store.delete(a.job_id), e => e.code === 'job_active');
+  assert.equal((await store.get(a.job_id)).status, 'working');
+  calls[0].resolve({ answer: 'ok' }); await store.get(a.job_id, 1000);
+  await assert.rejects(store.start({ prompt: 'b' }), e => e.code === 'capacity');
+  assert.deepEqual(await store.delete(a.job_id), { job_id: a.job_id, deleted: true });
+  assert.deepEqual(await files(config), []);
+  await assert.rejects(store.delete(a.job_id), e => e.code === 'not_found');
+  await assert.rejects(store.get(a.job_id), e => e.code === 'not_found');
+  await store.start({ prompt: 'b' });
+  await assert.rejects(store.delete('job_missing'), e => e.code === 'not_found');
+});
+
+test('deleted jobs and idempotency keys do not resurrect after restart', async t => {
+  const { config } = await setup(t);
+  const { run, calls } = fakeRun();
+  const s1 = new JobStore(config, { run }); await s1.ready();
+  const a = await s1.start({ prompt: 'p', idempotency_key: 'k' });
+  await sleep(10);
+  calls[0].resolve({ answer: 'ok' });
+  // Delete races the queued completion write; the file must not come back.
+  await s1.get(a.job_id, 1000);
+  await s1.delete(a.job_id);
+  await s1.close();
+  assert.deepEqual(await files(config), []);
+  const f = fakeRun();
+  const s2 = await open(t, config, f.run);
+  assert.deepEqual(await s2.list(), []);
+  const b = await s2.start({ prompt: 'q', idempotency_key: 'k' }); // key freed, no conflict
+  assert.notEqual(b.job_id, a.job_id);
+});
+
+test('delete waits for queued persistence so a late write cannot recreate the file', async t => {
+  const { config } = await setup(t);
+  const { run, calls } = fakeRun();
+  const store = await open(t, config, run);
+  const a = await store.start({ prompt: 'a' });
+  await sleep(10);
+  calls[0].resolve({ answer: 'ok' });
+  await sleep(0);
+  await store.delete(a.job_id); // no await on get: completion write may still be queued
+  await sleep(50);
+  assert.deepEqual(await files(config), []);
+});
+
+test('concurrent delete and idempotent start create a fresh job without conflict', async t => {
+  const { config } = await setup(t);
+  const { run, calls } = fakeRun();
+  const store = await open(t, config, run);
+  const a = await store.start({ prompt: 'p', idempotency_key: 'k' });
+  await sleep(10);
+  calls[0].resolve({ answer: 'ok' }); await store.get(a.job_id, 1000);
+  const [del, started] = await Promise.allSettled([store.delete(a.job_id), store.start({ prompt: 'p', idempotency_key: 'k' })]);
+  assert.equal(del.status, 'fulfilled');
+  // Start observed either the original (before delete) or a fresh job; never a conflict or a deleted ghost.
+  assert.equal(started.status, 'fulfilled');
+  if (started.value.job_id !== a.job_id) assert.equal((await store.get(started.value.job_id)).status, 'working');
+  else assert.deepEqual(await files(config), []);
+});

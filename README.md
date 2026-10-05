@@ -10,8 +10,9 @@ An MCP server that runs [Claude Code](https://code.claude.com/docs/en/overview) 
 | `ask` | `prompt`; optional `model`, `cwd`, `wait_ms`, `idempotency_key`, `execution_timeout_ms` | Quick completed answer or recoverable job receipt |
 | `start_job` | Same inputs as `ask` | Immediate `job_id` and status |
 | `get_job` | `job_id`; optional `wait_ms` (0–30000) | Safe assistant progress, terminal result or error |
-| `list_jobs` | None | Retained jobs, without prompts |
+| `list_jobs` | None | Metadata summaries (id, status, timestamps, model, cwd, `error_code`) without prompts, `partial_answer` or `result`; use `get_job` for output |
 | `cancel_job` | `job_id` | Explicit process-group cancellation; terminal results remain unchanged |
+| `delete_job` | `job_id` | Permanently deletes a terminal job and its snapshot; active jobs are rejected (`job_active`), unknown or already-deleted ids return `not_found` |
 
 `ask` starts an independent job and waits at most 30 seconds. A quick answer keeps the original answer shape. Longer work returns `job_id` with `working`; poll `get_job` until `completed`, `failed`, or `cancelled`. `start_job` returns immediately. CLI errors and permission denials remain errors. Generation has no default wall-clock deadline.
 
@@ -139,7 +140,7 @@ Only `cancel_job`, an explicitly supplied `execution_timeout_ms`, or server shut
 
 Each state directory must have one server process owner. Do not launch another HTTP or STDIO server against the same directory while the first is running; give independent STDIO instances a separate `CLAUDE_MCP_JOB_DIR`.
 
-Snapshots retain redacted assistant text and final results, never prompts, hidden thinking, tool inputs or tool results. Atomic snapshots use private directory/file permissions (0700/0600). Native HTTP state defaults to `~/.local/state/claude-mcp/jobs`; standalone STDIO uses a `stdio` subdirectory under the configured state directory to avoid clashing with HTTP. Docker uses `/var/lib/claude-mcp/jobs` on the included `claude-mcp-state` named volume. Retention is seven days and capacity 128 retained jobs / 4 concurrent jobs by default. Expired terminal files are removed on subsequent operations. A full store rejects new work rather than evicting running jobs.
+Snapshots retain redacted assistant text and final results, never prompts, hidden thinking, tool inputs or tool results. Atomic snapshots use private directory/file permissions (0700/0600). Native HTTP state defaults to `~/.local/state/claude-mcp/jobs`; standalone STDIO uses a `stdio` subdirectory under the configured state directory to avoid clashing with HTTP. Docker uses `/var/lib/claude-mcp/jobs` on the included `claude-mcp-state` named volume. Retention is seven days and capacity 128 retained jobs / 4 concurrent jobs by default. Expired terminal files are removed on subsequent operations. Retained terminal jobs count toward capacity and are never evicted automatically: a full store rejects new work (`capacity`) until you `delete_job` finished jobs or they pass retention. Deleting frees capacity and the idempotency key immediately and survives restart. Job tools are single-tenant: any authenticated caller can list, read, cancel and delete all jobs.
 
 ## Configuration
 
@@ -168,7 +169,7 @@ Snapshots retain redacted assistant text and final results, never prompts, hidde
 | `CLAUDE_MCP_HOST_WORKSPACE` | `.` | Compose-only host bind source |
 | `CLAUDE_MCP_PORT` | `8877` | Compose-only published host port |
 
-`ask.timeout_ms` is a deprecated wait alias, clamped to 30 seconds; it no longer kills generation. The legacy `CLAUDE_MCP_TIMEOUT_MS` environment setting is likewise a wait alias if `CLAUDE_MCP_WAIT_MS` is absent. Use `execution_timeout_ms` only when an actual execution deadline is intended. Polling waits should stay below the client request deadline. Model discovery queries `/v1/models` (or `/models` for a base ending in `/v1`), supports bounded pagination and rejects redirects. If unavailable, only the explicit `CLAUDE_MCP_MODELS` list is returned with `source: configured` and a reason. `ask.model` accepts any model identifier supported by your gateway.
+**Breaking change:** `ask.timeout_ms` no longer bounds execution; it is a deprecated wait alias, clamped to 30 seconds; it no longer kills generation. The legacy `CLAUDE_MCP_TIMEOUT_MS` environment setting is likewise a wait alias if `CLAUDE_MCP_WAIT_MS` is absent. Use `execution_timeout_ms` only when an actual execution deadline is intended. Polling waits should stay below the client request deadline. Model discovery queries `/v1/models` (or `/models` for a base ending in `/v1`), supports bounded pagination and rejects redirects. If unavailable, only the explicit `CLAUDE_MCP_MODELS` list is returned with `source: configured` and a reason. `ask.model` accepts any model identifier supported by your gateway.
 
 HTTP initialization returns an MCP session ID used for later requests. Cancellation notifications stop request waiting only; use `cancel_job` to stop generation. Sessions are bounded to 64 with idle expiry/eviction; in-flight calls are never evicted. Reinitialize an expired idle session. JSON-RPC batches are rejected before execution.
 

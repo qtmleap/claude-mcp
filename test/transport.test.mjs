@@ -14,10 +14,10 @@ async function cfg(t){
  const file=join(root,'cli');await writeFile(file,'#!/usr/bin/env node\nlet p="";process.stdin.on("data",c=>p+=c);process.stdin.on("end",()=>console.log(JSON.stringify({type:"result",subtype:"success",is_error:false,result:"answer:"+p})));',{mode:0o755});
  return loadConfig({...process.env,CLAUDE_MCP_WORKSPACE:root,CLAUDE_MCP_JOB_DIR:join(root,'state'),CLAUDE_MCP_COMMAND:file,CLAUDE_MCP_MODELS:'gateway/model-a,gateway/model-b',ANTHROPIC_BASE_URL:'',PORT:'0'});
 }
-test('HTTP initialization, two tools, configured models and completed ask',async t=>{
+test('HTTP initialization, tools, configured models and completed ask',async t=>{
  const config=await cfg(t);const app=await startHttp(config);t.after(()=>app.close());
  const client=new Client({name:'test',version:'1'});await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));t.after(()=>client.close());
- assert.deepEqual((await client.listTools()).tools.map(t=>t.name),['models','ask','start_job','get_job','list_jobs','cancel_job']);
+ assert.deepEqual((await client.listTools()).tools.map(t=>t.name),['models','ask','start_job','get_job','list_jobs','cancel_job','delete_job']);
  assert.equal((await client.callTool({name:'models',arguments:{}})).structuredContent.source,'configured');
  const answer=await client.callTool({name:'ask',arguments:{prompt:'hello',model:'custom/anything'}});
  assert.equal(answer.structuredContent.answer,'answer:hello');
@@ -27,7 +27,7 @@ test('HTTP initialization, two tools, configured models and completed ask',async
 test('STDIO is protocol-only and supports the same tools',async t=>{
  const config=await cfg(t);const transport=new StdioClientTransport({command:process.execPath,args:['src/main.mjs','--transport','stdio'],cwd:process.cwd(),env:{...process.env,CLAUDE_MCP_WORKSPACE:config.root,CLAUDE_MCP_JOB_DIR:join(config.root,'stdio-state'),CLAUDE_MCP_COMMAND:config.command,CLAUDE_MCP_MODELS:'sonnet',ANTHROPIC_BASE_URL:''},stderr:'pipe'});
  const client=new Client({name:'stdio-test',version:'1'});await client.connect(transport);t.after(()=>client.close());
- assert.equal((await client.listTools()).tools.length,6);
+ assert.equal((await client.listTools()).tools.length,7);
  assert.equal((await client.callTool({name:'ask',arguments:{prompt:'stdio'}})).structuredContent.answer,'answer:stdio');
 });
 test('optional MCP auth and host validation guard HTTP',async t=>{
@@ -70,7 +70,7 @@ test('repeated reconnects do not exhaust idle session capacity',async t=>{
  for(let i=0;i<66;i++){
   const client=new Client({name:'reconnect-test',version:'1'});
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));
-  assert.equal((await client.listTools()).tools.length,6);await client.close();
+  assert.equal((await client.listTools()).tools.length,7);await client.close();
  }
 });
 
@@ -95,4 +95,17 @@ test('MCP advertises its cwd context and returns actionable pre-execution errors
  assert.equal(error.structuredContent.error.details.execution_started,false);
  assert.equal(error.structuredContent.error.details.default_cwd,config.root);
  const valid=await client.callTool({name:'ask',arguments:{prompt:'1+1'}});assert.equal(valid.structuredContent.answer,'answer:1+1');
+});
+
+test('delete_job over MCP removes terminal jobs, rejects active ones; list_jobs is summary-only',async t=>{
+ const config=await cfg(t);const app=await startHttp(config);t.after(()=>app.close());
+ const client=new Client({name:'delete-test',version:'1'});await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));t.after(()=>client.close());
+ const done=(await client.callTool({name:'ask',arguments:{prompt:'hi'}})).structuredContent;assert.equal(done.answer,'answer:hi');
+ const listed=(await client.callTool({name:'list_jobs',arguments:{}})).structuredContent.jobs;
+ assert.equal(listed.length,1);assert.equal('result' in listed[0],false);assert.equal('partial_answer' in listed[0],false);
+ const removed=await client.callTool({name:'delete_job',arguments:{job_id:listed[0].job_id}});
+ assert.deepEqual(removed.structuredContent,{job_id:listed[0].job_id,deleted:true});
+ assert.deepEqual((await client.callTool({name:'list_jobs',arguments:{}})).structuredContent.jobs,[]);
+ const again=await client.callTool({name:'delete_job',arguments:{job_id:listed[0].job_id}});
+ assert.equal(again.isError,true);assert.equal(again.structuredContent.error.code,'not_found');
 });
