@@ -3,26 +3,64 @@ on: [push, pull_request]
 permissions:
   contents: read
 jobs:
+  ci-change-scope:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci-change-scope.yaml
+    with:
+      doc-paths: '["AGENTS.md","CLAUDE.md","README.md","docs/development/ci-change-scope.md"]'
+      doc-prefixes: '[]'
+      runner: '["self-hosted","ubuntu-latest"]'
+
   test:
-    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && (true) }}
+    needs: ["ci-change-scope"]
+    runs-on: ${{ fromJSON((needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true') && '["self-hosted","ubuntu-latest"]' || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v7
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
       - uses: actions/setup-node@v6
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         with:
           node-version: 24
           cache: npm
       - run: npm ci
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
       - run: npm test
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
       - run: npm audit --omit=dev
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
+      - name: Docs-only exemption
+        if: ${{ needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true' }}
+        shell: bash
+        working-directory: .
+        env:
+          CI_CHANGE_REASON: ${{ needs['ci-change-scope'].outputs.reason }}
+        run: |
+          printf '%s\n' "$CI_CHANGE_REASON" >> "$GITHUB_STEP_SUMMARY"
   image:
-    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && (true) }}
+    needs: ["ci-change-scope"]
+    runs-on: ${{ fromJSON((needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true') && '["self-hosted","ubuntu-latest"]' || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v7
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
       - uses: docker/setup-buildx-action@v4
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
       - uses: docker/build-push-action@v7
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
         with:
           context: .
           push: false
           tags: claude-mcp:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Docs-only exemption
+        if: ${{ needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true' }}
+        shell: bash
+        working-directory: .
+        env:
+          CI_CHANGE_REASON: ${{ needs['ci-change-scope'].outputs.reason }}
+        run: |
+          printf '%s\n' "$CI_CHANGE_REASON" >> "$GITHUB_STEP_SUMMARY"
