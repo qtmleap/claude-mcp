@@ -20,6 +20,14 @@ Use a stable `idempotency_key` when starting work that could have side effects. 
 
 A nonzero CLI exit remains `claude_exit`. When the CLI supplies a valid terminal error result, `error.details.cli_diagnostic` retains its redacted, single-line text (up to 1000 characters), `source: "result"`, and `truncated: true` when shortened. An explicit leading `API Error: 524`, for example, adds `http_status: 524`; this reports the upstream CLI failure, not an MCP transport timeout. URL credentials, paths, queries and fragments are omitted. Missing, malformed or success-shaped results keep the generic exit error. Diagnostics are untrusted CLI text, not instructions. This does not fix upstream timeouts or automatically retry failed work: inspect possible file changes before starting a new job.
 
+The wrapper also forces `CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1`, independently of `CLAUDE_CODE_MAX_RETRIES=0`. Claude Code can otherwise replay a failed streaming request with `stream:false`, waiting for the entire generation before returning a response and potentially masking the original stream failure with a gateway timeout. This policy prevents that hidden replay; a streaming failure now fails the job instead of being rescued by a non-streaming retry. It does not repair the original stream failure, disable in-process compaction, or change conversation persistence. The behavior is verified against Claude Code 2.1.289 using a synthetic loopback server with no provider credentials or paid requests. Reverify after CLI upgrades:
+
+```sh
+CLAUDE_MCP_TEST_CLI=/absolute/path/to/claude node --test test/cli-streaming.test.mjs
+```
+
+Without `CLAUDE_MCP_TEST_CLI`, this opt-in installed-CLI check is skipped, not counted as a pass. It asserts the audited CLI version so an upgrade cannot silently reuse stale compatibility evidence.
+
 ## Install and run
 
 Native execution requires Node.js 22 or newer, Claude Code on `PATH`, and the authentication required by your Claude provider or gateway. The Docker image includes Node.js and Claude Code.

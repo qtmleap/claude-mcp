@@ -14,7 +14,7 @@ export function redact(text, env = process.env) {
   return value;
 }
 export function childEnvironment(env) {
-  const result = { ...env, CLAUDE_CODE_MAX_RETRIES:'0', CLAUDE_CODE_RETRY_WATCHDOG:'0', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1' };
+  const result = { ...env, CLAUDE_CODE_MAX_RETRIES:'0', CLAUDE_CODE_RETRY_WATCHDOG:'0', CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK:'1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1' };
   // CLI supports gateway custom headers; these also let models use the same Access identity.
   const headers = env.ANTHROPIC_CUSTOM_HEADERS ? [env.ANTHROPIC_CUSTOM_HEADERS] : [];
   for (const [key, name] of [['CF_ACCESS_CLIENT_ID','CF-Access-Client-Id'],['CF_ACCESS_CLIENT_SECRET','CF-Access-Client-Secret']]) {

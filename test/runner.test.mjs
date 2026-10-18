@@ -54,6 +54,22 @@ test('gateway environment supports bearer, API key and Cloudflare headers',()=>{
   assert.equal(env.CLAUDE_CODE_RETRY_WATCHDOG,'0');
 });
 
+test('hidden non-streaming fallback is disabled even when the parent enables it',()=>{
+  for(const value of [undefined, '', '0', 'false']){
+    const env=childEnvironment({CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK:value,CLAUDECODE:'parent'});
+    assert.equal(env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK,'1');
+    assert.equal(env.CLAUDECODE,undefined);
+  }
+});
+
+test('fallback policy reaches the CLI without changing conversation arguments',async context=>{
+  const {config}=await fixture(context,`console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:JSON.stringify({fallback:process.env.CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK,args:process.argv.slice(2)})}));`);
+  const answer=JSON.parse((await runAsk({prompt:'synthetic'},config)).answer);
+  assert.equal(answer.fallback,'1');
+  assert.ok(answer.args.includes('--no-session-persistence'));
+  assert.ok(!answer.args.some(value=>/resume|compact|session-id/.test(value)));
+});
+
 test('completed parent cannot leave same-group background processes alive',async t=>{
  const {root,config}=await fixture(t, `const fs=require('fs'),cp=require('child_process');const c=cp.spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});fs.writeFileSync('background-pid',String(c.pid));c.unref();console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'done'}));`);
  await runAsk({prompt:'test'},config);const pid=Number(await readFile(join(root,'background-pid'),'utf8'));
