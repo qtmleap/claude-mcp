@@ -16,9 +16,9 @@ async function fixture(context){
   return {root,config,store,initial};
 }
 
-test('post-result failure retains accounting and suppresses denied output without allowing resume',{timeout:10000},async context=>{
+test('post-result failure retains accounting and suppresses denied output without allowing resume',{timeout:15000},async context=>{
   const {root,config,store,initial}=await fixture(context);
-  const failed=await store.get(initial.job_id,8000);
+  const failed=await store.get(initial.job_id,12000);
   assert.equal(failed.status,'failed');assert.equal(failed.error.code,'cli_shutdown_timeout');
   assert.equal(failed.error.details?.usage?.invocation.outputTokens,4);
   assert.equal(failed.error.details.permission_denied,true);

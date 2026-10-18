@@ -35,8 +35,13 @@ Only allowlisted error classes, stream event counts and elapsed times are retain
 raw debug stderr is discarded and is never saved as a log or error message.
 This diagnoses a first-stream failure; it does not itself repair a transport fault.
 
-Finite print processes that return a terminal result but fail to exit within five
-seconds fail with `cli_shutdown_timeout`; their conversation cannot be resumed.
+Finite print processes that return a valid terminal result but fail to exit within ten
+seconds fail with `cli_shutdown_timeout`; their conversation cannot be resumed. The
+ten-second grace covers the CLI's measured normal background-shell cleanup (about
+five seconds with CLI 2.1.289); success still requires a natural zero exit. Invalid or
+mismatched terminal results keep a five-second bound, and cancellation and explicit
+execution deadlines still take precedence. This grace addresses that demonstrated
+false timeout only; it is not an explanation of the original lost-stream incident.
 After the process exits, inherited pipes cannot keep polling or cancellation stuck.
 
 Native execution requires Node.js 22 or newer, Claude Code on `PATH`, and the authentication required by your Claude provider or gateway. The Docker image includes Node.js and Claude Code.

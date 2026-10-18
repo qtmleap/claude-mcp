@@ -49,6 +49,8 @@ async function resolveWorkspace(cwd, root, mountedRoots = [root]) {
 export async function resolveCwd(cwd, root, mountedRoots = [root]) {
   return (await resolveWorkspace(cwd,root,mountedRoots)).cwd;
 }
+const VALID_SHUTDOWN_GRACE_MS = 10000;
+const INVALID_SHUTDOWN_GRACE_MS = 5000;
 // Review profile: read-only, no MCP/hooks/plugins, cwd-confined. Enforced as flags on every launch, not by prompt.
 const REVIEW_TOOLS = 'Read,Grep,Glob';
 const REVIEW_INSTRUCTION = 'You are a code reviewer. Read the applicable AGENTS.md and CLAUDE.md files inside the repository. Focus only on the diff, paths, line ranges or findings the caller specifies; use the supplied manifest. Do not rescan unrelated parts of the repository and do not repeat earlier reports. Re-inspect the current source of anything you comment on: never approve based on stale content.';
@@ -151,7 +153,7 @@ export async function runAsk(args, config, signal, options = {}) {
         if(finalResult) return;
         finalResult=event;
         const valid = validTerminalResult(event,session);
-        if(!exited && !resultTimer) resultTimer=setTimeout(()=>fail(valid?'cli_shutdown_timeout':session && event.session_id!==session.uuid?'session_mismatch':'invalid_json','Claude emitted a terminal result but did not exit; execution stopped and was not retried.'),5000);
+        if(!exited && !resultTimer) resultTimer=setTimeout(()=>fail(valid?'cli_shutdown_timeout':session && event.session_id!==session.uuid?'session_mismatch':'invalid_json','Claude emitted a terminal result but did not exit; execution stopped and was not retried.'),valid?VALID_SHUTDOWN_GRACE_MS:INVALID_SHUTDOWN_GRACE_MS);
         return;
       }
       const delta=event?.type==='stream_event' ? event.event?.delta : null;

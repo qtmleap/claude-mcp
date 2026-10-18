@@ -50,12 +50,14 @@ test('cancellation settles after leader exit even when an escaped holder keeps p
   await assert.rejects(runAsk({ prompt: 'synthetic' }, config, controller.signal, { stream: true }), error => error.code === 'cancelled');
 });
 
-test('a valid terminal result cannot hold a live print process forever', { timeout: 8000 }, async context => {
+test('a valid terminal result cannot hold a live print process forever', { timeout: 15000 }, async context => {
   const config = await fixture(context, `require('fs').writeFileSync('pids',JSON.stringify([process.pid]));console.log(${success});setInterval(()=>{},1000);`);
+  const started = Date.now();
   await assert.rejects(runAsk({ prompt: 'synthetic' }, config, undefined, { stream: true }), error => error.code === 'cli_shutdown_timeout');
+  assert.ok(Date.now() - started >= 9500);
 });
 
-test('JSON print mode also detects a terminal result followed by a lingering process', { timeout: 8000 }, async context => {
+test('JSON print mode also detects a terminal result followed by a lingering process', { timeout: 15000 }, async context => {
   const config = await fixture(context, `require('fs').writeFileSync('pids',JSON.stringify([process.pid]));console.log(${success});setInterval(()=>{},1000);`);
   await assert.rejects(runAsk({ prompt: 'synthetic' }, config), error => error.code === 'cli_shutdown_timeout');
 });
@@ -73,4 +75,46 @@ test('a later result cannot replace the first terminal result', async context =>
 test('generation without a terminal result is not stopped by cleanup timers', { timeout: 8000 }, async context => {
   const config = await fixture(context, `setTimeout(()=>console.log(${success}),5500);`);
   assert.equal((await runAsk({ prompt: 'synthetic' }, config, undefined, { stream: true })).answer, 'done');
+});
+
+const delayedExit = (output, exitCode) => `${output};setTimeout(()=>process.exit(${exitCode}),6000);`;
+const failureResult = `JSON.stringify({type:'result',subtype:'error_during_execution',is_error:true,result:'API Error: 524 upstream'})`;
+const hangingAfter = output => `require('fs').writeFileSync('pids',JSON.stringify([process.pid]));${output};setInterval(()=>{},1000);`;
+
+test('a valid terminal result tolerates a normal cleanup delay beyond five seconds', { timeout: 15000 }, async context => {
+  const cases = [
+    { name: 'zero exit JSON', code: delayedExit(`console.log(${success})`, 0), options: {}, check: result => assert.equal(result.answer, 'done') },
+    { name: 'nonzero exit stream', code: delayedExit(`console.log(${success})`, 7), options: { stream: true }, check: error => assert.ok(error.code === 'claude_exit' && /code 7/.test(error.message)) },
+    { name: 'valid error result', code: delayedExit(`console.log(${failureResult})`, 1), options: { stream: true }, check: error => assert.ok(error.code === 'claude_exit' && error.details.cli_diagnostic.http_status === 524) }
+  ];
+  await Promise.all(cases.map(async ({ name, code, options, check }) => {
+    const config = await fixture(context, code);
+    const started = Date.now();
+    const outcome = await runAsk({ prompt: 'synthetic' }, config, undefined, options).then(value => value, error => error);
+    assert.ok(Date.now() - started >= 5500, name);
+    check(outcome);
+  }));
+});
+
+test('cancellation after the former five second grace still wins during valid cleanup', { timeout: 15000 }, async context => {
+  const config = await fixture(context, hangingAfter(`console.log(${success})`));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  context.after(() => clearTimeout(timer));
+  await assert.rejects(runAsk({ prompt: 'synthetic' }, config, controller.signal, { stream: true }), error => error.code === 'cancelled');
+});
+
+test('an explicit execution deadline wins during valid cleanup', { timeout: 15000 }, async context => {
+  const config = await fixture(context, hangingAfter(`console.log(${success})`));
+  const started = Date.now();
+  await assert.rejects(runAsk({ prompt: 'synthetic', timeout_ms: 1500 }, config, undefined, { stream: true }), error => error.code === 'timeout');
+  assert.ok(Date.now() - started < 4000);
+});
+
+test('a malformed terminal result keeps the five second shutdown bound', { timeout: 15000 }, async context => {
+  const config = await fixture(context, hangingAfter(`console.log(JSON.stringify({type:'result',subtype:'success',is_error:false}))`));
+  const started = Date.now();
+  await assert.rejects(runAsk({ prompt: 'synthetic' }, config, undefined, { stream: true }), error => error.code === 'invalid_json');
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed >= 4500 && elapsed < 8000);
 });
