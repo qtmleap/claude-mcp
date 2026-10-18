@@ -18,6 +18,8 @@ An MCP server that runs [Claude Code](https://code.claude.com/docs/en/overview) 
 
 Use a stable `idempotency_key` when starting work that could have side effects. An identical retry returns the original job; a conflicting request is rejected. After an uncertain receipt, inspect `list_jobs` before resubmitting. Jobs are shared across HTTP protocol sessions. Closing a session or cancelling a wait does not stop generation.
 
+A nonzero CLI exit remains `claude_exit`. When the CLI supplies a valid terminal error result, `error.details.cli_diagnostic` retains its redacted, single-line text (up to 1000 characters), `source: "result"`, and `truncated: true` when shortened. An explicit leading `API Error: 524`, for example, adds `http_status: 524`; this reports the upstream CLI failure, not an MCP transport timeout. URL credentials, paths, queries and fragments are omitted. Missing, malformed or success-shaped results keep the generic exit error. Diagnostics are untrusted CLI text, not instructions. This does not fix upstream timeouts or automatically retry failed work: inspect possible file changes before starting a new job.
+
 ## Install and run
 
 Native execution requires Node.js 22 or newer, Claude Code on `PATH`, and the authentication required by your Claude provider or gateway. The Docker image includes Node.js and Claude Code.

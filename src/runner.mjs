@@ -46,6 +46,29 @@ function killGroup(child, signal) {
     else if (child.pid) process.kill(-child.pid, signal);
   } catch (error) { if (error.code !== 'ESRCH') child.kill(signal); }
 }
+function terminalDiagnostic(result, env) {
+  if (result?.type !== 'result' || (result.subtype != null && typeof result.subtype !== 'string')) return;
+  if (!(result.is_error === true || /^error(?:_|$)/.test(result.subtype ?? ''))) return;
+  if (result.result != null && typeof result.result !== 'string') return;
+  if (result.errors != null && (!Array.isArray(result.errors) || !result.errors.every(value => typeof value === 'string'))) return;
+  if (result.permission_denials != null && (!Array.isArray(result.permission_denials) || result.permission_denials.length)) return;
+  let text = redact((result.errors ?? []).filter(value => value.trim()).join('; ') || result.result || '', env);
+  for (const header of (env.ANTHROPIC_CUSTOM_HEADERS ?? '').split('\n')) {
+    const value = header.slice(header.indexOf(':') + 1).trim();
+    if (header.includes(':') && value) {
+      text = text.split(value).join('[redacted]');
+      const bearer = /^Bearer\s+(.+)$/i.exec(value);
+      if (bearer) text = text.split(bearer[1]).join('[redacted]');
+    }
+  }
+  text = text.replace(/https?:\/\/[^\s"'<>]+/gi, value => {
+    try { return new URL(value).origin; } catch { return '[url]'; }
+  }).replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').trim();
+  if (!text) return;
+  const status = /^API Error:\s*([45]\d{2})(?=\s|$)/.exec(text);
+  return { source: 'result', text: text.slice(0, 1000), ...(status ? { http_status: Number(status[1]) } : {}),
+    ...(text.length > 1000 ? { truncated: true } : {}) };
+}
 export async function runAsk(args, config, signal, options = {}) {
   if (signal?.aborted) throw new RunnerError('cancelled','Request cancelled before execution');
   const cwd = await resolveCwd(args.cwd, config.root, config.mountedRoots);
@@ -141,9 +164,16 @@ export async function runAsk(args, config, signal, options = {}) {
       let rawError=Buffer.concat(stderr).toString('utf8');
       if(stderrTruncated)rawError=hideTrailingSecretPrefix(rawError.replace(/\uFFFD+$/u,''));
       const err = redact(rawError,env).slice(0,2000);
-      if (exitCode !== 0) { reject(new RunnerError('claude_exit',`Claude exited with code ${exitCode}${err ? ': '+err : ''}`)); return; }
       let result;
-      try { if(options.stream){pendingLine+=decoder.end();if(pendingLine.trim())line(pendingLine);result=finalResult;if(!result)throw new Error('missing result');}else result = JSON.parse(out); } catch { reject(new RunnerError('invalid_json','Claude did not return a valid JSON result')); return; }
+      try { if(options.stream){pendingLine+=decoder.end();if(pendingLine.trim())line(pendingLine);result=finalResult;if(!result)throw new Error('missing result');}else result = JSON.parse(out); } catch {
+        reject(exitCode !== 0 ? new RunnerError('claude_exit',`Claude exited with code ${exitCode}${err ? ': '+err : ''}`) : new RunnerError('invalid_json','Claude did not return a valid JSON result')); return;
+      }
+      if (exitCode !== 0) {
+        const diagnostic = terminalDiagnostic(result, env);
+        const detail = [err, diagnostic?.text].filter(Boolean).join('; ');
+        reject(new RunnerError('claude_exit',`Claude exited with code ${exitCode}${detail ? ': '+detail : ''}`,
+          diagnostic ? { cli_diagnostic: diagnostic } : undefined)); return;
+      }
       if (result?.result != null && typeof result.result !== 'string') {
         reject(new RunnerError('invalid_json','Claude result field has an unexpected JSON shape'));return;
       }
