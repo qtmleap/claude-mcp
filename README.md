@@ -10,7 +10,7 @@ An MCP server that runs [Claude Code](https://code.claude.com/docs/en/overview) 
 | `ask` | `prompt`; optional `model`, `cwd`, `wait_ms`, `idempotency_key`, `execution_timeout_ms` | Quick completed answer or recoverable job receipt |
 | `start_job` | Same inputs as `ask` | Immediate `job_id` and status |
 | `get_job` | `job_id`; optional `wait_ms` (0–30000) | Safe assistant progress, terminal result or error |
-| `list_jobs` | None | Metadata summaries (id, status, timestamps, model, cwd, `error_code`) without prompts, `partial_answer` or `result`; use `get_job` for output |
+| `list_jobs` | `limit` (default 20, max 100), `status`, `cursor` | Newest-first page `{jobs,count,has_more,next_cursor}` of metadata summaries (id, status, timestamps, model, cwd, `error_code`) without prompts, `partial_answer` or `result`; use `get_job` for output |
 | `cancel_job` | `job_id` | Explicit process-group cancellation; terminal results remain unchanged |
 | `delete_job` | `job_id` | Permanently deletes a terminal job and its snapshot; active jobs are rejected (`job_active`), unknown or already-deleted ids return `not_found` |
 
@@ -29,6 +29,15 @@ CLAUDE_MCP_TEST_CLI=/absolute/path/to/claude node --test test/cli-streaming.test
 Without `CLAUDE_MCP_TEST_CLI`, this opt-in installed-CLI check is skipped, not counted as a pass. It asserts the audited CLI version so an upgrade cannot silently reuse stale compatibility evidence.
 
 ## Install and run
+
+Optional `CLAUDE_MCP_STREAM_DIAGNOSTICS=1` enables native stderr diagnostics.
+Only allowlisted error classes, stream event counts and elapsed times are retained;
+raw debug stderr is discarded and is never saved as a log or error message.
+This diagnoses a first-stream failure; it does not itself repair a transport fault.
+
+Finite print processes that return a terminal result but fail to exit within five
+seconds fail with `cli_shutdown_timeout`; their conversation cannot be resumed.
+After the process exits, inherited pipes cannot keep polling or cancellation stuck.
 
 Native execution requires Node.js 22 or newer, Claude Code on `PATH`, and the authentication required by your Claude provider or gateway. The Docker image includes Node.js and Claude Code.
 
@@ -144,13 +153,34 @@ Call `models` to inspect `execution_context.default_cwd` and `execution_context.
 
 By default, `acceptEdits` permits file edits and `Read,Grep,Glob` are explicitly allowed. Other tools requiring approval are denied because no interactive permission prompt is available. Configure `CLAUDE_MCP_ALLOWED_TOOLS` or `CLAUDE_MCP_PERMISSION_MODE` for your workflow. A `permission_denials` result is reported as an error even when Claude also produced an answer.
 
+Such errors use code `permission_denied` with `details` containing the unique denied `tool_names`, `permission_mode`, `allowed_tools`, `cwd` and `execution_started: true` (tools may already have run). Terminal errors omit tool inputs and clear retained partial answers once the denial is observed; earlier live progress cannot be withdrawn. Configured secrets are redacted. `models` reports `execution_context.permission_mode` and `allowed_tools` so callers can see in advance which tools (e.g. `Bash`) are not permitted.
+
+Every configured mounted root is canonicalised and passed to Claude as `--add-dir`, so sibling repositories under the advertised roots are available from the selected `cwd` for reading and, under the configured permissions, writing. `cwd` is not a write boundary. Only configured roots are added; a missing or inaccessible root fails the call before Claude starts (`mounted_root_unavailable`). This does not bypass permissions.
+
+Allowing `Bash` enables native command execution with the child process environment and read-write mounted workspaces. Only enable it for trusted delegated work; command output redaction matches configured secret strings and is not a sandbox or protection against encoded output. Use command-specific Bash allow rules when a deployment only needs inspection commands. Global defaults remain `Read,Grep,Glob`.
+
 MCP authentication is optional: set `CLAUDE_MCP_TOKEN` to require a bearer token on `/mcp`. Host and browser Origin checks protect the local endpoint. External hosting requires its own access controls and frontend configuration.
 
 Only `cancel_job`, an explicitly supplied `execution_timeout_ms`, or server shutdown terminates generation. Request deadlines and transport disconnects only stop waiting. Shutdown cleans up owned process groups and persists active jobs as `failed` with `interrupted` and execution uncertainty; restart never reruns them. Same-group descendants are cleaned up on normal exit.
 
 Each state directory must have one server process owner. Do not launch another HTTP or STDIO server against the same directory while the first is running; STDIO processes may share a configured directory because each uses its own run subdirectory (see below).
 
-Snapshots retain redacted assistant text and final results, never prompts, hidden thinking, tool inputs or tool results. Atomic snapshots use private directory/file permissions (0700/0600). Native HTTP state defaults to `~/.local/state/claude-mcp/jobs`; each standalone STDIO process uses its own unique run subdirectory `<state dir>/stdio/<uuid>`, even with a configured state directory. STDIO jobs and results are only available within the owning process: after exit the run snapshots stay on disk but are not reloaded automatically, and those run directories need manual cleanup (they are never deleted automatically, since they may hold useful records). HTTP state is stable and recoverable across reconnects and restarts. An `ask` whose job is cancelled while waiting returns an MCP error (`cancelled`, with `details.job_id`); `get_job` still returns the cancelled snapshot normally. Docker uses `/var/lib/claude-mcp/jobs` on the included `claude-mcp-state` named volume. Retention is seven days and capacity 128 retained jobs / 4 concurrent jobs by default. Expired terminal files are removed on subsequent operations. Retained terminal jobs count toward capacity and are never evicted automatically: a full store rejects new work (`capacity`) until you `delete_job` finished jobs or they pass retention. Deleting frees capacity and the idempotency key immediately and survives restart. Job tools are single-tenant: any authenticated caller can list, read, cancel and delete all jobs.
+Snapshots retain redacted assistant text and final results, never prompts, hidden thinking, tool inputs or tool results. Atomic snapshots use private directory/file permissions (0700/0600). Native HTTP state defaults to `~/.local/state/claude-mcp/jobs`; each standalone STDIO process uses its own unique run subdirectory `<state dir>/stdio/<uuid>`, even with a configured state directory. STDIO jobs and results are only available within the owning process: after exit the run snapshots stay on disk but are not reloaded automatically, and those run directories need manual cleanup (they are never deleted automatically, since they may hold useful records). HTTP state is stable and recoverable across reconnects and restarts. An `ask` whose job is cancelled while waiting returns an MCP error (`cancelled`, with `details.job_id`); `get_job` still returns the cancelled snapshot normally. Docker uses `/var/lib/claude-mcp/jobs` on the included `claude-mcp-state` named volume. Retention is seven days and capacity 128 retained jobs / 4 concurrent jobs by default. Expired terminal files are removed on subsequent operations. Retained terminal jobs count toward capacity and are never evicted automatically: a full store rejects new work (`capacity`; `cancel_job` does not free history, and a cancelled job keeps its concurrency slot until its process has exited) until you `delete_job` finished jobs or they pass retention. Deleting frees capacity and the idempotency key immediately and survives restart. Job tools are single-tenant: any authenticated caller can list, read, cancel and delete all jobs.
+
+## Resumable review conversations (opt-in)
+
+`ask`/`start_job` accept `resumable`, `resume_job_id`, `review` and `max_budget_usd` (finite, >0, <=100, passed as `--max-budget-usd`). Default calls keep no native conversation transcript (`--no-session-persistence`); job receipts and results retain their existing policy.
+
+- `review:true` enforces, on every launch, `--bare --restricted --tools Read,Grep,Glob --disallowedTools 'mcp__*' --strict-mcp-config` with an empty MCP config, no extra `--add-dir` roots and no Bash/Edit/Write/hooks/plugins, plus an appended instruction to read applicable AGENTS/CLAUDE files and stick to the supplied scope.
+- `resumable:true` (requires explicit `model` and `review:true`) allocates a native session UUID server-side (`--session-id`). Transcripts, including prompts and answers, are kept under `CLAUDE_MCP_SESSION_DIR` (0700/0600) until expiry (job retention), cleaned up on later session operations (best effort; per-directory failures are logged and quarantined). Claimed or unreadable/rootless state is quarantined for explicit operator inspection, never deleted on an age/PID guess.
+- `resume_job_id` (exclusive with `resumable`) continues from the conversation's **current successful head** (`--resume`). Model, cwd and review are inherited; explicit mismatches are rejected (`session_mismatch`). Once reserved, every attempt becomes the head before launch (even a later setup/shutdown/persistence failure): a failed, cancelled or interrupted turn blocks the conversation (`chain_blocked`), an older job is `stale_ancestor`, and a second concurrent turn (any connection or process) gets `chain_busy`. There is no automatic recovery, reset or fork: start a new chain. A claim is never overridden by age or numeric PID: an unconfirmed owner remains quarantined.
+- Results and snapshots carry `session: {id, cli_session_id, resume_available}`; `result.usage` holds per-invocation `invocation` tokens, conversation-cumulative `conversationModelUsage`/`conversationCostUSD`, and `invocationCostDeltaUSD` (null when unknown, e.g. a cost decrease after a reset). A missing cost invalidates the next delta; a reported cost reset establishes a new baseline. Valid accounting from failed CLI results is also retained in `error.details.usage`. These are CLI estimates, not billing records; session reuse does not guarantee provider cache hits or lower total usage. Nothing is guessed and no savings percentage is claimed.
+- `delete_job` deletes only the receipt/result and idempotency record. It does **not** erase the independent native transcript or root: the current successful head can still be resumed until conversation expiry. To erase a conversation early, an operator must first confirm it has no active owner, then remove only its UUID directory under `CLAUDE_MCP_SESSION_DIR`. Never remove a claimed/active conversation.
+- A successful result can briefly have `session.resume_available:false` while persistence settles. Poll `get_job` with a bounded wait before resuming or starting a replacement; the successful answer alone does not confirm readiness.
+- Completion keeps final text only in `result.answer`; `partial_answer` is live progress and becomes empty. All calls gain additive normalized usage fields, including stateless calls.
+- Scope: single-owner local MCP boundary; the file claim excludes concurrent processes sharing the state volume, it is not a multitenant ACL.
+
+Review workflow: the caller builds a source-fingerprinted diff manifest with native git (revision, ranges, fingerprint) and sends or references it in the first request; each resume sends only the delta and the new fingerprint. The server computes no diffs and caches no review results, and a follow-up must re-inspect the changed source rather than reuse a stale approval.
 
 ## Configuration
 
@@ -167,9 +197,12 @@ Snapshots retain redacted assistant text and final results, never prompts, hidde
 | `CLAUDE_MCP_COMMAND` | `claude` | CLI executable |
 | `CLAUDE_MCP_WAIT_MS` | `10000` | Default bounded ask wait, capped at 30000 ms |
 | `CLAUDE_MCP_JOB_DIR` | Native state directory | Private durable snapshot directory |
+| `CLAUDE_MCP_SESSION_DIR` | `sessions` beside the job dir | Private per-conversation state (root record, claim, native CLI config/transcripts) for resumable chains; keep it on the same persistent volume |
 | `CLAUDE_MCP_MAX_JOBS` | `128` | Maximum retained jobs |
 | `CLAUDE_MCP_MAX_CONCURRENT_JOBS` | `4` | Maximum running jobs |
 | `CLAUDE_MCP_JOB_RETENTION_MS` | `604800000` | Terminal result retention |
+| `CLAUDE_MCP_SESSION_IDLE_MS` | `300000` | Idle HTTP session expiry (1000–86400000) |
+| `CLAUDE_MCP_MAX_SESSIONS` | `64` | Maximum HTTP protocol sessions (1–1024) |
 | `CLAUDE_MCP_MAX_OUTPUT_BYTES` | `1048576` | Combined CLI output and per-page model response limit |
 | `CLAUDE_MCP_MODELS_TIMEOUT_MS` | `10000` | Model-discovery deadline |
 | `CLAUDE_MCP_PERMISSION_MODE` | `acceptEdits` | CLI permission mode |
@@ -181,7 +214,7 @@ Snapshots retain redacted assistant text and final results, never prompts, hidde
 
 **Breaking change:** `ask.timeout_ms` no longer bounds execution; it is a deprecated wait alias, clamped to 30 seconds; it no longer kills generation. The legacy `CLAUDE_MCP_TIMEOUT_MS` environment setting is likewise a wait alias if `CLAUDE_MCP_WAIT_MS` is absent. Use `execution_timeout_ms` only when an actual execution deadline is intended. Polling waits should stay below the client request deadline. Model discovery queries `/v1/models` (or `/models` for a base ending in `/v1`), supports bounded pagination and rejects redirects. If unavailable, only the explicit `CLAUDE_MCP_MODELS` list is returned with `source: configured` and a reason. `ask.model` accepts any model identifier supported by your gateway.
 
-HTTP initialization returns an MCP session ID used for later requests. Cancellation notifications stop request waiting only; use `cancel_job` to stop generation. Sessions are bounded to 64 with idle expiry/eviction; in-flight calls are never evicted. Reinitialize an expired idle session. JSON-RPC batches are rejected before execution.
+HTTP initialization returns an MCP session ID used for later requests. Cancellation notifications stop request waiting only; use `cancel_job` to stop generation. Sessions are bounded by `CLAUDE_MCP_MAX_SESSIONS` (default 64) and expire after `CLAUDE_MCP_SESSION_IDLE_MS` (default 5 minutes) of idleness, measured from the end of the last response; in-flight calls are never expired or evicted, and job completion never closes a session. Job results, `get_job` and idempotency live in the job store, not the session, so they remain available after a session expires. Reinitialize an expired session (404). JSON-RPC batches are rejected before execution.
 
 ## Development and verification
 

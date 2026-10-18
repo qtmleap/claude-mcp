@@ -37,7 +37,7 @@ async function fixture(context, healthy=false){
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   context.after(async()=>{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));});
   const env={PATH:process.env.PATH,HOME:root,CLAUDE_CONFIG_DIR:root,ANTHROPIC_BASE_URL:`http://127.0.0.1:${server.address().port}`,ANTHROPIC_AUTH_TOKEN:'synthetic-only',CLAUDE_CODE_MAX_RETRIES:'0',CLAUDE_CODE_RETRY_WATCHDOG:'0',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:'1',DISABLE_AUTOUPDATER:'1'};
-  return {requests,root,env,config:{root,command,env,maxOutput:32000,timeoutMs:10000,permissionMode:'acceptEdits',allowedTools:[]}};
+  return {requests,root,env,config:{root,command,env,maxOutput:32000,timeoutMs:10000,permissionMode:'acceptEdits',allowedTools:[],streamDiagnostics:true}};
 }
 
 test('installed CLI does not replay a broken stream as a non-streaming request',{skip:!command,timeout:30000},async context=>{
@@ -60,9 +60,11 @@ test('installed CLI does not replay a broken stream as a non-streaming request',
       assert.equal(error.code,'claude_exit');
       assert.match(error.details.cli_diagnostic.text,/^API Error: Connection to the API was lost \(StreamTruncated\)/);
       assert.equal(error.details.cli_diagnostic.http_status,undefined);
+      assert.equal(error.details.stream_diagnostic.first_error,'StreamTruncated');
       return true;
     });
     assert.deepEqual(requests.map(request=>request.stream),[true]);
+    assert.deepEqual(await import('node:fs/promises').then(fs=>fs.readdir(config.root+'/debug').catch(()=>[])),[]);
   });
   await context.test('healthy streaming remains successful',async childContext=>{
     const {config,requests}=await fixture(childContext,true);

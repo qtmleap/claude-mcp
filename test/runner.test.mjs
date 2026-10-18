@@ -34,6 +34,34 @@ test('CLI JSON error and permission denial never become success', async t => {
     await assert.rejects(runAsk({prompt:'test'},config),e=>e instanceof RunnerError && !e.message.includes('private-test-token'));
   }
 });
+test('permission_denied reports unique redacted tool names and context, never inputs or partial answer',async t=>{
+  const json={type:'result',subtype:'success',is_error:false,result:'PARTIAL-ANSWER',permission_denials:[
+    {tool_name:'Bash',tool_input:{command:'hostname SECRET-INPUT'}},{tool_name:'Bash',tool_input:{command:'git status'}},{tool_name:'private-test-token',tool_input:{}}]};
+  const {root,config}=await fixture(t,`console.log(${JSON.stringify(JSON.stringify(json))})`);
+  config.allowedTools=['Read','private-test-token'];
+  await assert.rejects(runAsk({prompt:'test'},config),e=>{
+    assert.equal(e.code,'permission_denied');
+    assert.deepEqual(e.details,{tool_names:['Bash','[redacted]'],permission_mode:'acceptEdits',allowed_tools:['Read','[redacted]'],cwd:root,execution_started:true});
+    const text=JSON.stringify(e.details)+e.message;
+    for(const s of ['SECRET-INPUT','git status','PARTIAL-ANSWER','private-test-token'])assert.ok(!text.includes(s),s);
+    return true;
+  });
+});
+test('canonical mounted roots are passed as --add-dir, including spaces and symlinks',async t=>{
+  const {root,config}=await fixture(t,`console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:JSON.stringify(process.argv.slice(2))}))`);
+  const {mkdir,symlink}=await import('node:fs/promises');
+  const spaced=join(root,'with space');await mkdir(spaced);
+  const link=join(root,'link');await symlink(spaced,link);
+  config.mountedRoots=[root,link,spaced];
+  const args=JSON.parse((await runAsk({prompt:'x'},config)).answer);
+  assert.deepEqual(args.filter(a=>a.startsWith('--add-dir=')),[`--add-dir=${spaced}`]);
+});
+test('missing configured mounted root fails before spawn',async t=>{
+  const {root,config}=await fixture(t,`require('fs').writeFileSync('spawned','1')`);
+  config.mountedRoots=[root,join(root,'missing-root')];
+  await assert.rejects(runAsk({prompt:'x'},config),e=>e.code==='invalid_cwd'&&e.details.reason==='mounted_root_unavailable'&&e.details.execution_started===false);
+  await assert.rejects(readFile(join(root,'spawned')),e=>e.code==='ENOENT');
+});
 test('invalid JSON, output limit and nonzero exit fail',async t=>{
   for(const code of ['console.log("not JSON")','process.stdout.write("x".repeat(20000))','console.log(JSON.stringify({result:"looks okay",is_error:false,type:"result",subtype:"success"}));process.exitCode=3']){
     const {config}=await fixture(t,code);await assert.rejects(runAsk({prompt:'test'},config));
@@ -94,3 +122,11 @@ test('non-string error result cannot crash result formatting',async t=>{
  const result=spawnSync(process.execPath,['--input-type=module','-e',program],{encoding:'utf8',timeout:2000});
  assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/handled/);
 });
+
+ test('configured mounted root that is a file fails before spawn',async t=>{
+  const {root,config}=await fixture(t,`require('fs').writeFileSync('spawned','1')`);
+  const file=join(root,'not-a-directory');await writeFile(file,'text');
+  config.mountedRoots=[root,file];
+  await assert.rejects(runAsk({prompt:'x'},config),e=>e.code==='invalid_cwd'&&e.details.reason==='mounted_root_unavailable'&&e.details.execution_started===false);
+  await assert.rejects(readFile(join(root,'spawned')),e=>e.code==='ENOENT');
+ });
