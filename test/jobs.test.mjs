@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JobStore } from '../src/jobs.mjs';
 import { RunnerError } from '../src/runner.mjs';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 
 const SECRET = 'private-test-token';
 const PROMPT = 'PROMPT-SHOULD-NOT-PERSIST';
@@ -370,4 +372,102 @@ test('concurrent delete and idempotent start create a fresh job without conflict
   assert.equal(started.status, 'fulfilled');
   if (started.value.job_id !== a.job_id) assert.equal((await store.get(started.value.job_id)).status, 'working');
   else assert.deepEqual(await files(config), []);
+});
+
+test('cancelled job keeps its concurrency slot until the runner actually settles', async t => {
+  const { config } = await setup(t, { maxJobs: 10, maxConcurrentJobs: 1 });
+  const { run, calls } = fakeRun();
+  const store = await open(t, config, run);
+  const a = await store.start({ prompt: 'a' });
+  calls[0].onAbort = () => {}; // Runner keeps unwinding after the abort signal.
+  const cancelling = store.cancel(a.job_id);
+  await sleep(20);
+  assert.equal((await store.get(a.job_id)).status, 'cancelled');
+  await assert.rejects(store.start({ prompt: 'b' }), e => e.code === 'capacity' && /concurrent/i.test(e.message));
+  assert.equal(calls.length, 1);
+  calls[0].reject(new RunnerError('cancelled', 'unwound'));
+  await cancelling;
+  await store.start({ prompt: 'c' });
+  assert.equal(calls.length, 2);
+});
+
+test('capacity errors distinguish retained history from running capacity', async t => {
+  const { config } = await setup(t, { maxJobs: 1, maxConcurrentJobs: 4 });
+  const { run, calls } = fakeRun();
+  const store = await open(t, config, run);
+  const a = await store.start({ prompt: 'a' });
+  calls[0].resolve({ answer: 'ok' }); await store.get(a.job_id, 1000);
+  await assert.rejects(store.start({ prompt: 'b' }), e => e.code === 'capacity'
+    && /retained/i.test(e.message) && /delete_job/.test(e.message) && /cancel_job does not free/i.test(e.message));
+  const { config: c2 } = await setup(t, { maxJobs: 5, maxConcurrentJobs: 1 });
+  const f = fakeRun(); const s2 = await open(t, c2, f.run);
+  await s2.start({ prompt: 'a' });
+  await assert.rejects(s2.start({ prompt: 'b' }), e => e.code === 'capacity' && /concurrent/i.test(e.message) && !/retained/i.test(e.message));
+});
+
+test('completed results and idempotency stay retrievable after execution resources are released', async t => {
+  const { config } = await setup(t, { maxJobs: 10, maxConcurrentJobs: 1 });
+  const { run, calls } = fakeRun();
+  const store = await open(t, config, run);
+  const a = await store.start({ prompt: 'a', idempotency_key: 'k1' });
+  calls[0].resolve({ answer: 'kept' }); await store.get(a.job_id, 1000);
+  await sleep(20);
+  assert.equal((await store.get(a.job_id)).result.answer, 'kept');
+  const again = await store.start({ prompt: 'a', idempotency_key: 'k1' });
+  assert.equal(again.job_id, a.job_id); assert.equal(again.result.answer, 'kept');
+  assert.equal(calls.length, 1);
+  const b = await store.start({ prompt: 'b' }); // slot released, history retained
+  assert.notEqual(b.job_id, a.job_id);
+  assert.equal((await store.list()).length, 2);
+});
+
+test('deleting a cancelled job that is still unwinding keeps its slot and close still waits for it', async t => {
+  const { config } = await setup(t, { maxJobs: 10, maxConcurrentJobs: 1, closeTimeoutMs: 2000 });
+  const { run, calls } = fakeRun();
+  const store = await open(t, config, run);
+  const a = await store.start({ prompt: 'a' });
+  calls[0].onAbort = () => {};
+  const cancelling = store.cancel(a.job_id);
+  await sleep(20);
+  await store.delete(a.job_id);
+  await assert.rejects(store.start({ prompt: 'b' }), e => e.code === 'capacity' && /concurrent/i.test(e.message));
+  let closed = false;
+  const closing = store.close().then(() => { closed = true; });
+  await sleep(50);
+  assert.equal(closed, false);
+  calls[0].reject(new RunnerError('cancelled', 'unwound'));
+  await cancelling; await closing;
+  assert.equal(closed, true);
+});
+
+test('cancel during the first persistence never starts the runner and releases the slot', async t => {
+  const { config } = await setup(t, { maxJobs: 10, maxConcurrentJobs: 1 });
+  const { run, calls } = fakeRun();
+  const store = await open(t, config, run);
+  // Pause the real first snapshot write: polling can otherwise miss this narrow interval.
+  const entered = Promise.withResolvers(); const resume = Promise.withResolvers();
+  const original = fsPromises.writeFile; let first = true;
+  fsPromises.writeFile = async (...args) => {
+    if (first && String(args[0]).startsWith(config.stateDir)) {
+      first = false; entered.resolve(); await resume.promise;
+    }
+    return original(...args);
+  };
+  syncBuiltinESMExports();
+  let job_id;
+  try {
+    const starting = store.start({ prompt: 'a' });
+    await entered.promise;
+    [{ job_id }] = await store.list();
+    const cancelling = store.cancel(job_id);
+    assert.equal((await store.list())[0].status, 'cancelled');
+    resume.resolve();
+    await cancelling; await starting;
+  } finally {
+    resume.resolve(); fsPromises.writeFile = original; syncBuiltinESMExports();
+  }
+  assert.equal(calls.length, 0);
+  assert.equal((await store.get(job_id)).status, 'cancelled');
+  await store.start({ prompt: 'b' });
+  assert.equal(calls.length, 1);
 });
