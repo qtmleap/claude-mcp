@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: 24.22.1
 
       # Compare the tested commit's package version with its first parent. A merge or squash commit
       # on master is the unit of release. Unchanged versions end here, before any login or build.
