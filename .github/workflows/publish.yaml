@@ -40,7 +40,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v6
         with:
-          node-version: 24
+          node-version: 24.22.1
 
       # Compare the tested commit's package version with its first parent. A merge or squash commit
       # on master is the unit of release. Unchanged versions end here, before any login or build.
@@ -131,15 +131,25 @@ jobs:
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Missing pushed digest" >&2; exit 1; }
           ref="$IMAGE@$DIGEST"
           # Attestations appear as platform "unknown/unknown"; require exactly the two real platforms.
-          docker buildx imagetools inspect "$ref" --raw | node -e '
-            const idx = JSON.parse(require("fs").readFileSync(0, "utf8"));
+          index="$RUNNER_TEMP/published-index.json"
+          docker buildx imagetools inspect "$ref" --raw > "$index"
+          node -e '
+            const idx = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
             const real = idx.manifests.map(m => m.platform).filter(p => p && p.os !== "unknown" && p.architecture !== "unknown").map(p => `${p.os}/${p.architecture}`).sort();
-            if (real.join() !== "linux/amd64,linux/arm64") { console.error("Unexpected platforms: " + real.join()); process.exit(1); }'
+            if (real.join() !== "linux/amd64,linux/arm64") { console.error("Unexpected platforms: " + real.join()); process.exit(1); }' "$index"
           cid=
           trap '[ -z "$cid" ] || docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
           for arch in amd64 arm64; do
-            docker pull --platform "linux/$arch" "$ref" >/dev/null
-            cid=$(docker run -d --platform "linux/$arch" "$ref")
+            platform_digest=$(node -e '
+              const idx = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+              const match = idx.manifests.find(m => m.platform?.os === "linux" && m.platform.architecture === process.argv[2]);
+              if (!match || !/^sha256:[0-9a-f]{64}$/.test(match.digest)) process.exit(1);
+              console.log(match.digest);' "$index" "$arch")
+            # Distinct manifest refs avoid replacing one index digest with a second platform
+            # in Docker Engine's classic image store.
+            platform_ref="$IMAGE@$platform_digest"
+            docker pull --platform "linux/$arch" "$platform_ref" >/dev/null
+            cid=$(docker run -d --platform "linux/$arch" "$platform_ref")
             labels=$(docker inspect --type container --format '{{json .Config.Labels}}' "$cid")
             LABELS="$labels" node -e '
               const l = JSON.parse(process.env.LABELS);
