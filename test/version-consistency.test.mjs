@@ -17,5 +17,4 @@ test('package, lockfile root and MCP server report one release version',async t=
  const client=new Client({name:'version-test',version:'1'});
  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));t.after(()=>client.close());
  assert.equal(client.getServerVersion().version,pkg.version);
- assert.equal(pkg.version,'0.1.1');
 });
