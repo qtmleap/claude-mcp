@@ -1,0 +1,175 @@
+name: Publish
+# Publishes ghcr.io/qtmleap/claude-mcp only after the Test workflow succeeded for a push to master
+# in this repository, and only when that commit changed package.json's version. Existing semver
+# tags are never overwritten.
+on:
+  workflow_run:
+    workflows: [Test]
+    types: [completed]
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ghcr-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'qtmleap/claude-mcp' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'master' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    env:
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      IMAGE: ghcr.io/${{ github.repository }}
+      EXPECTED_NODE: 24.22.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      # Compare the tested commit's package version with its first parent. A merge or squash commit
+      # on master is the unit of release. Unchanged versions end here, before any login or build.
+      - name: Version gate
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid head SHA" >&2; exit 1; }
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA" || { echo "Checkout is not the tested commit" >&2; exit 1; }
+          current=$(node -p "require('./package.json').version")
+          parent=$(git show HEAD^1:package.json) || { echo "Cannot read first-parent package.json" >&2; exit 1; }
+          previous=$(printf '%s' "$parent" | node -e "console.log(JSON.parse(require('fs').readFileSync(0,'utf8')).version)")
+          if [ "$current" = "$previous" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            printf '### Publish skipped\nPackage version %s is unchanged from the first parent, so nothing was published.\n' "$current" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+          echo "version=$current" >> "$GITHUB_OUTPUT"
+          printf '### Publishing\nVersion %s (first parent: %s) at %s.\n' "$current" "$previous" "$HEAD_SHA" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require tested commit to be the master tip
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          live=$(gh api -H "Accept: application/vnd.github.sha" "repos/$REPO/commits/master")
+          test "$live" = "$HEAD_SHA" || { echo "master moved to a newer commit; refusing to publish a stale build" >&2; exit 1; }
+
+      - name: Check version is unpublished
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.gate.outputs.version }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/guard-ghcr-version.mjs
+
+      - uses: docker/login-action@v4
+        if: steps.gate.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/setup-qemu-action@v4
+        if: steps.gate.outputs.publish == 'true'
+      - uses: docker/setup-buildx-action@v4
+        if: steps.gate.outputs.publish == 'true'
+
+      - name: Re-check version immediately before push
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.gate.outputs.version }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/guard-ghcr-version.mjs
+
+      - name: Build and push
+        id: build
+        if: steps.gate.outputs.publish == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.gate.outputs.version }}
+            ${{ env.IMAGE }}:sha-${{ github.event.workflow_run.head_sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.event.workflow_run.head_sha }}
+            org.opencontainers.image.version=${{ steps.gate.outputs.version }}
+          cache-from: type=gha
+
+      # Verify the published index digest itself, per platform; nothing is rebuilt.
+      - name: Verify published image
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.gate.outputs.version }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Missing pushed digest" >&2; exit 1; }
+          ref="$IMAGE@$DIGEST"
+          # Attestations appear as platform "unknown/unknown"; require exactly the two real platforms.
+          docker buildx imagetools inspect "$ref" --raw | node -e '
+            const idx = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const real = idx.manifests.map(m => m.platform).filter(p => p && p.os !== "unknown" && p.architecture !== "unknown").map(p => `${p.os}/${p.architecture}`).sort();
+            if (real.join() !== "linux/amd64,linux/arm64") { console.error("Unexpected platforms: " + real.join()); process.exit(1); }'
+          cid=
+          trap '[ -z "$cid" ] || docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          for arch in amd64 arm64; do
+            docker pull --platform "linux/$arch" "$ref" >/dev/null
+            cid=$(docker run -d --platform "linux/$arch" "$ref")
+            labels=$(docker inspect --type container --format '{{json .Config.Labels}}' "$cid")
+            LABELS="$labels" node -e '
+              const l = JSON.parse(process.env.LABELS);
+              const want = { "org.opencontainers.image.source": process.env.SOURCE, "org.opencontainers.image.revision": process.env.HEAD_SHA, "org.opencontainers.image.version": process.env.VERSION };
+              for (const [k, v] of Object.entries(want)) if (l[k] !== v) { console.error(`Label ${k} mismatch`); process.exit(1); }'
+            actual=$(docker exec "$cid" /nodejs/bin/node -p process.versions.node)
+            test "$actual" = "$EXPECTED_NODE" || { echo "linux/$arch: Node $actual, expected $EXPECTED_NODE" >&2; exit 1; }
+            docker exec -i -w /opt/claude-mcp "$cid" /nodejs/bin/node --input-type=module - < scripts/smoke.mjs
+            docker rm -f "$cid" >/dev/null
+            cid=
+          done
+
+      - name: Re-check master and move latest
+        if: steps.gate.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ steps.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          live=$(gh api -H "Accept: application/vnd.github.sha" "repos/$REPO/commits/master")
+          if [ "$live" != "$HEAD_SHA" ]; then
+            echo "master moved during publish; $VERSION is published but latest was left unchanged" >&2
+            exit 1
+          fi
+          tagged=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')
+          test "$tagged" = "$DIGEST" || { echo "Version tag no longer points at the verified digest" >&2; exit 1; }
+          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
+          latest=$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{.Manifest.Digest}}')
+          test "$latest" = "$DIGEST" || { echo "latest does not match the verified digest" >&2; exit 1; }
+          printf 'Published %s:%s and latest at %s\n' "$IMAGE" "$VERSION" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"

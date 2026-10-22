@@ -239,6 +239,12 @@ Tests use isolated temporary workspaces and fake CLI processes for failure paths
 
 The Dockerfile uses BuildKit bind mounts for dependency manifests and cache mounts for package downloads. These build-time mounts are separate from the runtime workspace bind mount configured in Compose.
 
+## Publishing the image
+
+Pushes to `master` that pass the Test workflow run the Publish workflow, which publishes `ghcr.io/qtmleap/claude-mcp` for `linux/amd64` and `linux/arm64` as `<version>` and `sha-<commit>`, then moves `latest` to that verified digest. It publishes only when `package.json`'s `version` differs from the merged commit's first parent; otherwise the run ends with a skip note in its summary. To release, raise `version` in `package.json`, `package-lock.json` (the root and `packages[""]` entries) and `src/server.mjs` in a pull request, and merge it as a merge or squash commit. An existing version tag is never overwritten: if it already exists, the workflow fails.
+
+If a multi-commit push changed the version before the tip, or master advances before publication starts, that version is skipped. If verification or promotion fails after pushing a version tag, the immutable version remains published and `latest` may be unchanged. These cases deliberately fail closed: do not replay or overwrite the old tag; recover by merging a pull request with a new patch version.
+
 ## Container design
 
 The multi-stage Dockerfile installs packages in a Debian builder and copies production dependencies into a Distroless Node.js runtime. Dependency manifests are read using BuildKit bind mounts, download caches stay in cache mounts, and independent runtime layers use `COPY --link`. The final image has no npm, apt or build cache.

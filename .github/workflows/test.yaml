@@ -52,9 +52,24 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: claude-mcp:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Smoke test image
+        if: ${{ (needs['ci-change-scope'].result != 'success' || needs['ci-change-scope'].outputs.docs_only != 'true') }}
+        shell: bash
+        env:
+          IMAGE: claude-mcp:test
+          EXPECTED_NODE: 24.22.1
+        run: |
+          set -euo pipefail
+          # Health, MCP initialize and tools/list only; no provider or model calls, no published ports.
+          cid=$(docker run -d "$IMAGE")
+          trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+          actual=$(docker exec "$cid" /nodejs/bin/node -p process.versions.node)
+          test "$actual" = "$EXPECTED_NODE" || { echo "Node $actual in image, expected $EXPECTED_NODE" >&2; exit 1; }
+          docker exec -i -w /opt/claude-mcp "$cid" /nodejs/bin/node --input-type=module - < scripts/smoke.mjs
 
       - name: Docs-only exemption
         if: ${{ needs['ci-change-scope'].result == 'success' && needs['ci-change-scope'].outputs.docs_only == 'true' }}
