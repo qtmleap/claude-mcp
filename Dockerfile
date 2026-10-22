@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Build tools and package caches stay in this stage.
-FROM node:24.19.0-trixie-slim AS builder
+FROM node:24.22.1-trixie-slim AS builder
 ARG CLAUDE_CODE_VERSION=2.1.289
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
@@ -34,7 +34,7 @@ RUN mkdir -p /tools/usr/bin /tools/usr/lib /tools/usr/share \
  && chmod -R a-s /tools
 
 # Copy runtime dependencies into Distroless; no installer or cache is shipped.
-FROM gcr.io/distroless/nodejs24-debian13:nonroot AS runtime
+FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:78f07ef1b5ea71ad7c055df15d0dd8997f2d288f9158623c4d4ae3d765b7d50d AS runtime
 COPY --from=builder /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/local/bin/claude
 COPY --from=builder /usr/bin/tini /usr/bin/tini
 COPY --link --from=builder --chown=1000:1000 /opt/claude-mcp/node_modules /opt/claude-mcp/node_modules
