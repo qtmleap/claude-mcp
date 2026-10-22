@@ -268,11 +268,13 @@ test('terminal jobs past retention are removed from memory and disk', async t =>
   await sleep(80);
   assert.equal((await s1.list()).map(j => j.job_id).join(), live.job_id);
   await assert.rejects(s1.get(done.job_id), e => e.code === 'not_found');
+  for (let attempt = 0; attempt < 200 && (await files(config)).includes(`${done.job_id}.json`); attempt++) await sleep(10);
   assert.deepEqual(await files(config), [`${live.job_id}.json`]);
   await s1.close();
   await sleep(80);
   const s2 = await open(t, config, fakeRun().run);
   assert.deepEqual(await s2.list(), []);
+  for (let attempt = 0; attempt < 200 && (await files(config)).length; attempt++) await sleep(10);
   assert.deepEqual(await files(config), []);
 });
 
