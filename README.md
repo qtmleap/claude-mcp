@@ -4,15 +4,15 @@ An MCP server that runs [Claude Code](https://code.claude.com/docs/en/overview) 
 
 ## Tools
 
-| Tool | Inputs | Output |
-| --- | --- | --- |
-| `models` | None | Model identifiers, discovery source and the server's workspace context |
-| `ask` | `prompt`; optional `model`, `cwd`, `wait_ms`, `idempotency_key`, `execution_timeout_ms` | Quick completed answer or recoverable job receipt |
-| `start_job` | Same inputs as `ask` | Immediate `job_id` and status |
-| `get_job` | `job_id`; optional `wait_ms` (0–30000) | Safe assistant progress, terminal result or error |
-| `list_jobs` | `limit` (default 20, max 100), `status`, `cursor` | Newest-first page `{jobs,count,has_more,next_cursor}` of metadata summaries (id, status, timestamps, model, cwd, `error_code`) without prompts, `partial_answer` or `result`; use `get_job` for output |
-| `cancel_job` | `job_id` | Explicit process-group cancellation; terminal results remain unchanged |
-| `delete_job` | `job_id` | Permanently deletes a terminal job and its snapshot; active jobs are rejected (`job_active`), unknown or already-deleted ids return `not_found` |
+| Tool         | Inputs                                                                                  | Output                                                                                                                                                                                                 |
+| ------------ | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `models`     | None                                                                                    | Model identifiers, discovery source and the server's workspace context                                                                                                                                 |
+| `ask`        | `prompt`; optional `model`, `cwd`, `wait_ms`, `idempotency_key`, `execution_timeout_ms` | Quick completed answer or recoverable job receipt                                                                                                                                                      |
+| `start_job`  | Same inputs as `ask`                                                                    | Immediate `job_id` and status                                                                                                                                                                          |
+| `get_job`    | `job_id`; optional `wait_ms` (0–30000)                                                  | Safe assistant progress, terminal result or error                                                                                                                                                      |
+| `list_jobs`  | `limit` (default 20, max 100), `status`, `cursor`                                       | Newest-first page `{jobs,count,has_more,next_cursor}` of metadata summaries (id, status, timestamps, model, cwd, `error_code`) without prompts, `partial_answer` or `result`; use `get_job` for output |
+| `cancel_job` | `job_id`                                                                                | Explicit process-group cancellation; terminal results remain unchanged                                                                                                                                 |
+| `delete_job` | `job_id`                                                                                | Permanently deletes a terminal job and its snapshot; active jobs are rejected (`job_active`), unknown or already-deleted ids return `not_found`                                                        |
 
 `ask` starts an independent job and waits at most 30 seconds. A quick answer keeps the original answer shape. Longer work returns `job_id` with `working`; poll `get_job` until `completed`, `failed`, or `cancelled`. `start_job` returns immediately. CLI errors and permission denials remain errors. Generation has no default wall-clock deadline.
 
@@ -102,7 +102,7 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_MCP_MODELS: ${CLAUDE_MCP_MODELS:-sonnet,opus,haiku}
     ports:
-      - '127.0.0.1:${CLAUDE_MCP_PORT:-8877}:8877'
+      - "127.0.0.1:${CLAUDE_MCP_PORT:-8877}:8877"
     volumes:
       - type: bind
         source: ${CLAUDE_MCP_HOST_WORKSPACE:-.}
@@ -130,15 +130,19 @@ A native STDIO client configuration can use an absolute path to the entrypoint:
 
 ```json
 {
-  "mcpServers": {
-    "claude-mcp": {
-      "command": "node",
-      "args": ["/absolute/path/to/claude-mcp/src/main.mjs", "--transport", "stdio"],
-      "env": {
-        "CLAUDE_MCP_WORKSPACE": "/absolute/path/to/project"
-      }
-    }
-  }
+	"mcpServers": {
+		"claude-mcp": {
+			"command": "node",
+			"args": [
+				"/absolute/path/to/claude-mcp/src/main.mjs",
+				"--transport",
+				"stdio"
+			],
+			"env": {
+				"CLAUDE_MCP_WORKSPACE": "/absolute/path/to/project"
+			}
+		}
+	}
 }
 ```
 
@@ -149,7 +153,7 @@ The client must supply the provider environment to that process. For Docker STDI
 For ordinary questions, omit `cwd`:
 
 ```json
-{"prompt": "What is 1 + 1?", "model": "sonnet"}
+{ "prompt": "What is 1 + 1?", "model": "sonnet" }
 ```
 
 The default native workspace is the server process's current directory. Docker defaults to `/workspace`. Relative `cwd` resolves from `CLAUDE_MCP_WORKSPACE`; absolute `cwd` is checked against `CLAUDE_MCP_MOUNTED_ROOTS`. All paths refer to the **MCP server's filesystem**, which may differ from the client's filesystem. Do not automatically copy the client's current directory into `cwd`.
@@ -176,7 +180,7 @@ Snapshots retain redacted assistant text and final results, never prompts, hidde
 
 `ask`/`start_job` accept `resumable`, `resume_job_id`, `review` and `max_budget_usd` (finite, >0, <=100, passed as `--max-budget-usd`). Default calls keep no native conversation transcript (`--no-session-persistence`); job receipts and results retain their existing policy.
 
-- `review:true` enforces, on every launch, `--bare --restricted --tools Read,Grep,Glob --disallowedTools 'mcp__*' --strict-mcp-config` with an empty MCP config, no extra `--add-dir` roots and no Bash/Edit/Write/hooks/plugins, plus an appended instruction to read applicable AGENTS/CLAUDE files and stick to the supplied scope.
+- `review:true` enforces, on every launch, `--bare --restricted --tools Read,Grep,Glob --disallowedTools 'mcp__*' --strict-mcp-config` with an empty MCP config, the mounted roots passed as read-only `--add-dir` and no Bash/Edit/Write/hooks/plugins, plus an appended instruction to read applicable AGENTS/CLAUDE files and stick to the supplied scope.
 - `resumable:true` (requires explicit `model` and `review:true`) allocates a native session UUID server-side (`--session-id`). Transcripts, including prompts and answers, are kept under `CLAUDE_MCP_SESSION_DIR` (0700/0600) until expiry (job retention), cleaned up on later session operations (best effort; per-directory failures are logged and quarantined). Claimed or unreadable/rootless state is quarantined for explicit operator inspection, never deleted on an age/PID guess.
 - `resume_job_id` (exclusive with `resumable`) continues from the conversation's **current successful head** (`--resume`). Model, cwd and review are inherited; explicit mismatches are rejected (`session_mismatch`). Once reserved, every attempt becomes the head before launch (even a later setup/shutdown/persistence failure): a failed, cancelled or interrupted turn blocks the conversation (`chain_blocked`), an older job is `stale_ancestor`, and a second concurrent turn (any connection or process) gets `chain_busy`. There is no automatic recovery, reset or fork: start a new chain. A claim is never overridden by age or numeric PID: an unconfirmed owner remains quarantined.
 - Results and snapshots carry `session: {id, cli_session_id, resume_available}`; `result.usage` holds per-invocation `invocation` tokens, conversation-cumulative `conversationModelUsage`/`conversationCostUSD`, and `invocationCostDeltaUSD` (null when unknown, e.g. a cost decrease after a reset). A missing cost invalidates the next delta; a reported cost reset establishes a new baseline. Valid accounting from failed CLI results is also retained in `error.details.usage`. These are CLI estimates, not billing records; session reuse does not guarantee provider cache hits or lower total usage. Nothing is guessed and no savings percentage is claimed.
@@ -189,33 +193,33 @@ Review workflow: the caller builds a source-fingerprinted diff manifest with nat
 
 ## Configuration
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `ANTHROPIC_BASE_URL` | Claude CLI default | Anthropic-compatible gateway URL |
-| `ANTHROPIC_AUTH_TOKEN` | unset | Bearer-token authentication |
-| `ANTHROPIC_API_KEY` | unset | x-api-key authentication |
-| `ANTHROPIC_CUSTOM_HEADERS` | unset | Newline-separated gateway headers |
-| `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET` | unset | Optional Cloudflare Access headers |
-| `CLAUDE_MCP_WORKSPACE` | Process cwd; Docker `/workspace` | Default working directory |
-| `CLAUDE_MCP_MOUNTED_ROOTS` | Workspace | Comma-separated accessible workspace roots |
-| `CLAUDE_MCP_MODELS` | empty | Explicit fallback model IDs or Claude aliases |
-| `CLAUDE_MCP_COMMAND` | `claude` | CLI executable |
-| `CLAUDE_MCP_WAIT_MS` | `10000` | Default bounded ask wait, capped at 30000 ms |
-| `CLAUDE_MCP_JOB_DIR` | Native state directory | Private durable snapshot directory |
-| `CLAUDE_MCP_SESSION_DIR` | `sessions` beside the job dir | Private per-conversation state (root record, claim, native CLI config/transcripts) for resumable chains; keep it on the same persistent volume |
-| `CLAUDE_MCP_MAX_JOBS` | `128` | Maximum retained jobs |
-| `CLAUDE_MCP_MAX_CONCURRENT_JOBS` | `4` | Maximum running jobs |
-| `CLAUDE_MCP_JOB_RETENTION_MS` | `604800000` | Terminal result retention |
-| `CLAUDE_MCP_SESSION_IDLE_MS` | `300000` | Idle HTTP session expiry (1000–86400000) |
-| `CLAUDE_MCP_MAX_SESSIONS` | `64` | Maximum HTTP protocol sessions (1–1024) |
-| `CLAUDE_MCP_MAX_OUTPUT_BYTES` | `1048576` | Combined CLI output and per-page model response limit |
-| `CLAUDE_MCP_MODELS_TIMEOUT_MS` | `10000` | Model-discovery deadline |
-| `CLAUDE_MCP_PERMISSION_MODE` | `acceptEdits` | CLI permission mode |
-| `CLAUDE_MCP_ALLOWED_TOOLS` | `Read,Grep,Glob` | Tools allowed without prompting |
-| `CLAUDE_MCP_TOKEN` | unset | Optional MCP authentication |
-| `HOST`, `PORT` | `127.0.0.1`, `8877` | Native HTTP bind |
-| `CLAUDE_MCP_HOST_WORKSPACE` | `.` | Compose-only host bind source |
-| `CLAUDE_MCP_PORT` | `8877` | Compose-only published host port |
+| Variable                                         | Default                          | Purpose                                                                                                                                        |
+| ------------------------------------------------ | -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_BASE_URL`                             | Claude CLI default               | Anthropic-compatible gateway URL                                                                                                               |
+| `ANTHROPIC_AUTH_TOKEN`                           | unset                            | Bearer-token authentication                                                                                                                    |
+| `ANTHROPIC_API_KEY`                              | unset                            | x-api-key authentication                                                                                                                       |
+| `ANTHROPIC_CUSTOM_HEADERS`                       | unset                            | Newline-separated gateway headers                                                                                                              |
+| `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET` | unset                            | Optional Cloudflare Access headers                                                                                                             |
+| `CLAUDE_MCP_WORKSPACE`                           | Process cwd; Docker `/workspace` | Default working directory                                                                                                                      |
+| `CLAUDE_MCP_MOUNTED_ROOTS`                       | Workspace                        | Comma-separated accessible workspace roots                                                                                                     |
+| `CLAUDE_MCP_MODELS`                              | empty                            | Explicit fallback model IDs or Claude aliases                                                                                                  |
+| `CLAUDE_MCP_COMMAND`                             | `claude`                         | CLI executable                                                                                                                                 |
+| `CLAUDE_MCP_WAIT_MS`                             | `10000`                          | Default bounded ask wait, capped at 30000 ms                                                                                                   |
+| `CLAUDE_MCP_JOB_DIR`                             | Native state directory           | Private durable snapshot directory                                                                                                             |
+| `CLAUDE_MCP_SESSION_DIR`                         | `sessions` beside the job dir    | Private per-conversation state (root record, claim, native CLI config/transcripts) for resumable chains; keep it on the same persistent volume |
+| `CLAUDE_MCP_MAX_JOBS`                            | `128`                            | Maximum retained jobs                                                                                                                          |
+| `CLAUDE_MCP_MAX_CONCURRENT_JOBS`                 | `4`                              | Maximum running jobs                                                                                                                           |
+| `CLAUDE_MCP_JOB_RETENTION_MS`                    | `604800000`                      | Terminal result retention                                                                                                                      |
+| `CLAUDE_MCP_SESSION_IDLE_MS`                     | `300000`                         | Idle HTTP session expiry (1000–86400000)                                                                                                       |
+| `CLAUDE_MCP_MAX_SESSIONS`                        | `64`                             | Maximum HTTP protocol sessions (1–1024)                                                                                                        |
+| `CLAUDE_MCP_MAX_OUTPUT_BYTES`                    | `1048576`                        | Combined CLI output and per-page model response limit                                                                                          |
+| `CLAUDE_MCP_MODELS_TIMEOUT_MS`                   | `10000`                          | Model-discovery deadline                                                                                                                       |
+| `CLAUDE_MCP_PERMISSION_MODE`                     | `acceptEdits`                    | CLI permission mode                                                                                                                            |
+| `CLAUDE_MCP_ALLOWED_TOOLS`                       | `Read,Grep,Glob`                 | Tools allowed without prompting                                                                                                                |
+| `CLAUDE_MCP_TOKEN`                               | unset                            | Optional MCP authentication                                                                                                                    |
+| `HOST`, `PORT`                                   | `127.0.0.1`, `8877`              | Native HTTP bind                                                                                                                               |
+| `CLAUDE_MCP_HOST_WORKSPACE`                      | `.`                              | Compose-only host bind source                                                                                                                  |
+| `CLAUDE_MCP_PORT`                                | `8877`                           | Compose-only published host port                                                                                                               |
 
 **Breaking change:** `ask.timeout_ms` no longer bounds execution; it is a deprecated wait alias, clamped to 30 seconds; it no longer kills generation. The legacy `CLAUDE_MCP_TIMEOUT_MS` environment setting is likewise a wait alias if `CLAUDE_MCP_WAIT_MS` is absent. Use `execution_timeout_ms` only when an actual execution deadline is intended. Polling waits should stay below the client request deadline. Model discovery queries `/v1/models` (or `/models` for a base ending in `/v1`), supports bounded pagination and rejects redirects. If unavailable, only the explicit `CLAUDE_MCP_MODELS` list is returned with `source: configured` and a reason. `ask.model` accepts any model identifier supported by your gateway.
 

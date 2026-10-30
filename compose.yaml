@@ -19,10 +19,10 @@ services:
       CLAUDE_MCP_ALLOWED_TOOLS: ${CLAUDE_MCP_ALLOWED_TOOLS:-Read,Grep,Glob}
       CLAUDE_MCP_WAIT_MS: ${CLAUDE_MCP_WAIT_MS:-10000}
       CLAUDE_MCP_JOB_DIR: /var/lib/claude-mcp/jobs
-      CLAUDE_MCP_MAX_JOBS: ${CLAUDE_MCP_MAX_JOBS:-128}
+      CLAUDE_MCP_MAX_JOBS: ${CLAUDE_MCP_MAX_JOBS:-512}
       CLAUDE_MCP_STREAM_DIAGNOSTICS: ${CLAUDE_MCP_STREAM_DIAGNOSTICS:-0}
       CLAUDE_MCP_MAX_CONCURRENT_JOBS: ${CLAUDE_MCP_MAX_CONCURRENT_JOBS:-4}
-      CLAUDE_MCP_JOB_RETENTION_MS: ${CLAUDE_MCP_JOB_RETENTION_MS:-604800000}
+      CLAUDE_MCP_JOB_RETENTION_MS: ${CLAUDE_MCP_JOB_RETENTION_MS:-3600000}
       CLAUDE_MCP_SESSION_IDLE_MS: ${CLAUDE_MCP_SESSION_IDLE_MS:-300000}
       CLAUDE_MCP_MAX_SESSIONS: ${CLAUDE_MCP_MAX_SESSIONS:-64}
     ports:
@@ -30,7 +30,7 @@ services:
     volumes:
       - claude-mcp-state:/var/lib/claude-mcp
       - type: bind
-        source: ${CLAUDE_MCP_HOST_WORKSPACE:-.}
+        source: ${CLAUDE_MCP_HOST_WORKSPACE:-/Users/devonly/Developer/personal}
         target: /workspace
         bind:
           create_host_path: false
