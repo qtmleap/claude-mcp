@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { RunnerError, redact, childEnvironment } from "./errors.mjs";
+import { RunnerError, redact, childEnvironment, secretValues } from "./errors.mjs";
 import { resolveWorkspace, resolveCwd } from "./workspace.mjs";
 import { REVIEW_POLICY, REVIEW_TOOLS, validBudget } from "./review-policy.mjs";
 import { validTerminalResult } from "./terminal-result.mjs";
@@ -29,7 +29,7 @@ export async function runAsk(args, config, signal, options = {}) {
 	if (signal?.aborted)
 		throw new RunnerError("cancelled", "Request cancelled before execution");
 	const mountedRoots = config.mountedRoots ?? [config.root];
-	const { cwd, roots } = await resolveWorkspace(
+	const { cwd, roots } = options.workspace ?? await resolveWorkspace(
 		args.cwd,
 		config.root,
 		mountedRoots,
@@ -59,6 +59,12 @@ export async function runAsk(args, config, signal, options = {}) {
 		config.permissionMode,
 	];
 	if (args.review) argv.push(...REVIEW_POLICY);
+        if(options.localContext){
+            const old=argv.find(x=>x.startsWith('--append-system-prompt='));
+            if(old)argv.splice(argv.indexOf(old),1);
+            const note=`Execution context: backend=local; OS=${process.platform}; cwd=${JSON.stringify(cwd)}; roots=${JSON.stringify(roots)}. Tool availability is unprobed; a mounted directory does not establish its toolchain. This context does not grant permissions.`;
+            argv.push(`--append-system-prompt=${old?old.slice('--append-system-prompt='.length)+'\n':''}${note}`);
+        }
 	if (args.max_budget_usd !== undefined)
 		argv.push(`--max-budget-usd=${args.max_budget_usd}`);
 	if (options.stream) argv.push("--verbose", "--include-partial-messages");
@@ -68,7 +74,7 @@ export async function runAsk(args, config, signal, options = {}) {
 	if (args.model) argv.push(`--model=${args.model}`);
 	const allowed = args.review ? [REVIEW_TOOLS] : config.allowedTools;
 	if (allowed?.length) argv.push("--allowedTools", allowed.join(","));
-	const env = childEnvironment(config.env);
+	const env = options.environment ?? childEnvironment(config.env);
 	if (session) env.CLAUDE_CONFIG_DIR = session.configDir;
 	return new Promise((resolveResult, reject) => {
 		let failure,
@@ -91,14 +97,7 @@ export async function runAsk(args, config, signal, options = {}) {
 			jsonEscape = false,
 			jsonStarted = false,
 			jsonFinished = false;
-		const secrets = [
-			"ANTHROPIC_AUTH_TOKEN",
-			"ANTHROPIC_API_KEY",
-			"CF_ACCESS_CLIENT_SECRET",
-			"CF_ACCESS_CLIENT_ID",
-		]
-			.map((k) => env[k])
-			.filter(Boolean);
+		const secrets = secretValues(env);
 		const longestSecret = Math.max(0, ...secrets.map((s) => s.length));
 		const rawLimit = config.maxOutput + longestSecret;
 		// Capture enough UTF-8 bytes for 2000 characters plus a complete secret crossing
@@ -177,7 +176,7 @@ export async function runAsk(args, config, signal, options = {}) {
 				}
 			}
 		};
-		const child = spawn(config.command, argv, {
+		const child = options.launch ? options.launch(argv, env) : spawn(config.command, argv, {
 			cwd,
 			env,
 			shell: false,
@@ -188,6 +187,7 @@ export async function runAsk(args, config, signal, options = {}) {
 			if (failure) return;
 			failure = new RunnerError(code, message);
 			if (exited) return;
+			if(options.terminate){void options.terminate();return;}
 			killGroup(child, "SIGTERM");
 			killTimer = setTimeout(() => killGroup(child, "SIGKILL"), 300);
 			killTimer.unref();
@@ -295,7 +295,8 @@ export async function runAsk(args, config, signal, options = {}) {
 				child.stderr.destroy();
 			}, 500);
 		});
-		child.on("close", (exitCode) => {
+		child.on("close", async (exitCode) => {
+                if(options.settle)try{await options.settle();}catch(error){failure=error;}
 			clearTimeout(timer);
 			clearTimeout(killTimer);
 			clearTimeout(resultTimer);

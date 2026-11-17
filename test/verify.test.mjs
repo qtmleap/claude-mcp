@@ -21,3 +21,14 @@ test('portable verification script checks native HTTP and STDIO without deployme
   assert.match(result.stdout,mode==='http'?/CLAUDE_MCP_HTTP_OK/:/CLAUDE_MCP_STDIO_OK/);
  }
 });
+
+test('metadata verification never invokes print generation and reports probed context',async t=>{
+ const root=await realpath(await mkdtemp(join(tmpdir(),'claude-metadata-')));t.after(()=>rm(root,{recursive:true,force:true}));
+ const marker=join(root,'generated'),cli=join(root,'cli');
+ await writeFile(cli,'#!/usr/bin/env node\nif(process.argv.includes("-p")){require("fs").writeFileSync('+JSON.stringify(marker)+',"generation");process.exit(1)}else console.log("2.1.326 (Claude Code)");',{mode:0o755});
+ const env={...process.env,CLAUDE_MCP_COMMAND:cli,CLAUDE_MCP_JOB_DIR:join(root,'jobs'),CLAUDE_MCP_WORKSPACE:root,CLAUDE_MCP_MODELS:'fixture',ANTHROPIC_BASE_URL:'',CLAUDE_MCP_TOKEN:''};
+ const script=fileURLToPath(new URL('../scripts/verify.mjs',import.meta.url));
+ const result=await exec(process.execPath,[script,'stdio','--metadata'],{env,timeout:10000});
+ assert.match(result.stdout,/"status":"probed"/);assert.match(result.stdout,/"generation":"not_requested"/);
+ await assert.rejects(import('node:fs/promises').then(fs=>fs.readFile(marker)),e=>e.code==='ENOENT');
+});

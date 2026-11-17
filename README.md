@@ -148,6 +148,113 @@ A native STDIO client configuration can use an absolute path to the entrypoint:
 
 The client must supply the provider environment to that process. For Docker STDIO, use `docker compose exec -T claude-mcp node src/main.mjs --transport stdio` with the Compose project directory configured as the command's working directory, or pass an absolute `-f` Compose file path. STDIO stdout is reserved for MCP; diagnostics use stderr.
 
+## One service, several clients, project tools
+
+Point trusted clients at the same Streamable HTTP `/mcp` endpoint and existing
+MCP bearer token. Provider/gateway credentials stay configured once in that
+service. HTTP sessions share its job store, so reconnecting clients can recover
+jobs; this is a trusted single-tenant service, and authenticated clients can
+read, cancel and delete one another's jobs. Keep the existing network/access
+controls. A separate STDIO invocation starts a separate server process and is
+not the shared-service configuration.
+
+A bind mount supplies files, not the project's Python, virtual environment,
+compilers or services. Omitted `execution_profile` retains local execution in
+the MCP host/container. For a trusted existing Linux Dev Container, register an
+explicit Docker profile. The service does not start/create containers, change
+mounts, fall back to local execution, translate host paths, or copy credentials
+into project configuration files.
+
+Copy and adapt [examples/execution-profiles.json](examples/execution-profiles.json)
+to an operator-owned JSON file outside the repository. Set
+`CLAUDE_MCP_PROFILES_FILE` to its path. The example's executable paths describe
+one Dev Container layout; verify yours. Each entry fixes the container, user,
+absolute Node/Claude paths, target root/roots, expected bind mounts and labels,
+and optional fixed **read-only** version probes. Probe arguments are trusted
+operator configuration, never client input. Only PATH/LANG/LC_ALL/TZ/VIRTUAL_ENV
+may be configured as project environment overrides; provider credentials do not
+belong in the registry. The ID `local` is reserved.
+
+Call these tools before assigning project work:
+
+```json
+{"execution_profile":"hackerone","cwd":"/home/vscode/app"}
+```
+
+Use that object with `execution_context` to get actual bounded preflight evidence:
+Linux, canonical target cwd/roots, fixed execution user/UID, exact container ID,
+Claude version and each configured tool probe's outcome. This does not create a
+job or generate model output. `models` advertises profile IDs and the default
+configured local context; configuration alone is not proof of tool availability.
+Other tools are unprobed. Version checks do not establish that project tests pass.
+The worker also receives a concise context note distinguishing observed tools
+from unprobed tools; it grants no tool permissions.
+
+Then supply the selected profile to `start_job` or `ask`:
+
+```json
+{"prompt":"Run the focused project checks and report their actual results.","model":"your-observed-model-id","execution_profile":"hackerone","cwd":"/home/vscode/app","idempotency_key":"project-check-001"}
+```
+
+Docker cwd and paths in the prompt are **target-container** paths. A Mac path
+such as `/Users/devonly/Developer/HackerOne` does not become
+`/home/vscode/app` automatically. Each launch verifies the configured project
+bind/labels, pins the existing container ID, and checks symlink containment again
+inside the target as the configured user. Unavailable/mismatched targets fail
+before Claude starts. Returned receipts, results and list metadata include safe
+execution evidence. A retry with the same key/profile/policy returns its retained
+receipt even if the original container is now unavailable. A changed profile or
+policy conflicts; never retry uncertain generation with a new key automatically.
+
+The central service forwards only its allowlisted Anthropic/gateway variables
+using name-only Docker environment flags. Secret values are absent from command
+arguments, profile JSON and receipts, but exist transiently in the trusted Docker
+client/target process environments and are visible to administrators with daemon
+or process authority. The target helper rebuilds the CLI environment, excluding
+unrelated server/container credentials and the MCP token. It uses a private
+per-job HOME and Claude config directory and cleans them after the job. Remote
+calls enforce `--bare`, `--setting-sources ''`, and an empty strict MCP config:
+human/project settings, hooks and plugins cannot replace provider routing.
+Applicable AGENTS.md/CLAUDE.md discovery is explicitly requested through permitted
+file tools. This loading rule differs from ordinary local CLI settings discovery;
+registered project tools remain available through the selected PATH.
+
+Docker profiles initially support stateless calls only. `resumable` and
+`resume_job_id` are rejected before remote session allocation, including attempts
+to resume a local review in Docker. Existing local resumable reviews remain
+supported, with configured read-only roots and their existing tools/policy.
+
+HTTP disconnects and bounded waits leave generation running. Explicit
+`cancel_job`, execution deadlines and shutdown invoke owned target cleanup;
+killing a local `docker exec` client alone is insufficient. The helper records
+nonce/start-time ownership and cleans the process group plus tagged/observed
+descendants, including ordinary detached descendants. This is an ownership
+boundary for trusted work, not a sandbox against hostile processes deliberately
+scrubbing identity. Bystanders and the container remain running. Cleanup is
+bounded: an unreachable target, stale ownership or incomplete removal is retained
+as `cleanup.status: uncertain`, with exact container/resource evidence. No clean
+success is returned on unconfirmed cleanup. A server restart never replays a job
+and marks unfinished remote cleanup uncertain. Inspect the receipt and target
+before any operator recovery; do not blindly kill a PID or delete a live resource.
+
+For the Docker image, the pinned Docker CLI is present but inactive by default;
+[compose.yaml](compose.yaml) grants no daemon socket access. The optional
+[compose.docker.yaml](compose.docker.yaml) override uses the **same** MCP service.
+An operator must configure an absolute registry path, the intended daemon socket,
+and its group ID for the non-root service before applying that override. Mounting
+a socket read-only still grants daemon API authority; only trusted profiles and
+clients should receive this capability. Native execution can use the operator's
+existing Docker executable via `CLAUDE_MCP_DOCKER_COMMAND`.
+
+No deployment or migration happens merely by adding a profile file. Before an
+operator updates an existing service, confirm the actual Compose project/image,
+wait for active jobs to settle, retain its state volume and central environment,
+and validate the new image/configuration separately. Keep the same endpoint and
+job/session directories; do not run two owners against one state directory. Do
+not recreate the live service while its jobs need the current process. For oMLX
+installations with one serialized inference lane, explicitly set
+`CLAUDE_MCP_MAX_CONCURRENT_JOBS=1`; the generic default remains four.
+
 ## Workspace and permissions
 
 For ordinary questions, omit `cwd`:
@@ -203,6 +310,8 @@ Review workflow: the caller builds a source-fingerprinted diff manifest with nat
 | `CLAUDE_MCP_WORKSPACE`                           | Process cwd; Docker `/workspace` | Default working directory                                                                                                                      |
 | `CLAUDE_MCP_MOUNTED_ROOTS`                       | Workspace                        | Comma-separated accessible workspace roots                                                                                                     |
 | `CLAUDE_MCP_MODELS`                              | empty                            | Explicit fallback model IDs or Claude aliases                                                                                                  |
+| `CLAUDE_MCP_PROFILES_FILE` | unset | Operator-owned secret-free profile registry; omitted means local only |
+| `CLAUDE_MCP_DOCKER_COMMAND` | `docker` | Administrator-selected Docker client executable |
 | `CLAUDE_MCP_COMMAND`                             | `claude`                         | CLI executable                                                                                                                                 |
 | `CLAUDE_MCP_WAIT_MS`                             | `10000`                          | Default bounded ask wait, capped at 30000 ms                                                                                                   |
 | `CLAUDE_MCP_JOB_DIR`                             | Native state directory           | Private durable snapshot directory                                                                                                             |
@@ -230,7 +339,10 @@ HTTP initialization returns an MCP session ID used for later requests. Cancellat
 ```sh
 npm test
 npm audit --omit=dev
-# Smoke tests requiring a working provider connection:
+# Metadata/preflight only; no model generation:
+node scripts/verify.mjs http --metadata
+# Optional CLAUDE_MCP_VERIFY_PROFILE and CLAUDE_MCP_VERIFY_CWD select the target.
+# Opt-in live smoke tests requiring a working provider connection:
 node scripts/verify.mjs http
 node scripts/verify.mjs stdio
 node scripts/verify.mjs docker-stdio
@@ -244,7 +356,7 @@ CLAUDE_MCP_VERIFY_EXPECTED=claude-mcp \
 node scripts/verify.mjs http
 ```
 
-Tests use isolated temporary workspaces and fake CLI processes for failure paths. No account credentials are required for the test suite. Live smoke tests call the provider once per probe and do not automatically retry failures.
+Tests use isolated temporary workspaces and fake CLI processes for failure paths. The npm test command limits file parallelism to four so process-heavy fixtures do not distort short lifecycle deadlines. Optional real-helper checks use `CLAUDE_MCP_TEST_CONTAINER` and `CLAUDE_MCP_TEST_NODE` with the existing trusted HackerOne container; these tests create only nonce-owned temporary synthetic CLI/process fixtures, verify cleanup and preserve bystanders. No account credentials are required for the test suite. Live smoke tests call the provider once per probe and do not automatically retry failures.
 
 The Dockerfile uses BuildKit bind mounts for dependency manifests and cache mounts for package downloads. These build-time mounts are separate from the runtime workspace bind mount configured in Compose.
 
@@ -256,7 +368,7 @@ If a multi-commit push changed the version before the tip, or master advances be
 
 ## Container design
 
-The multi-stage Dockerfile installs packages in a Debian builder and copies production dependencies into a Distroless Node.js runtime. Dependency manifests are read using BuildKit bind mounts, download caches stay in cache mounts, and independent runtime layers use `COPY --link`. The final image has no npm, apt or build cache.
+The multi-stage Dockerfile installs packages in a Debian builder and copies production dependencies into a Distroless Node.js runtime. Dependency manifests are read using BuildKit bind mounts, download caches stay in cache mounts, and independent runtime layers use `COPY --link`. The final image has no npm, apt or build cache. It also contains a digest-pinned official Docker CLI, which cannot reach a daemon unless an operator explicitly supplies access.
 
 Claude Code can invoke shell commands, so the Distroless-based runtime includes Bash, standard command-line utilities, Git, ripgrep and the OpenSSH client with their required libraries. A shell-free runtime would break those workflows. The container runs as UID/GID 1000 with a writable home and workspace, and tini handles child-process reaping. Project-specific runtimes and compilers must be supplied separately when needed.
 

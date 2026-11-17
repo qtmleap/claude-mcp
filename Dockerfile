@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# Inactive client only; daemon/socket access is an operator opt-in.
+FROM docker:cli@sha256:34507eb5069d8be82c95dd3b6987d4250fd5fee49b82e2509b7d7a7030740d6d AS docker-cli
 # Build tools and package caches stay in this stage.
 FROM node:24.22.1-trixie-slim AS builder
 ARG CLAUDE_CODE_VERSION=2.1.289
@@ -37,6 +39,7 @@ RUN mkdir -p /tools/usr/bin /tools/usr/lib /tools/usr/share \
 FROM gcr.io/distroless/nodejs24-debian13:nonroot@sha256:78f07ef1b5ea71ad7c055df15d0dd8997f2d288f9158623c4d4ae3d765b7d50d AS runtime
 COPY --from=builder /usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe /usr/local/bin/claude
 COPY --from=builder /usr/bin/tini /usr/bin/tini
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --link --from=builder --chown=1000:1000 /opt/claude-mcp/node_modules /opt/claude-mcp/node_modules
 COPY --link --from=builder --chown=1000:1000 /opt/claude-mcp/package.json /opt/claude-mcp/package.json
 COPY --link --from=builder --chown=1000:1000 /opt/claude-mcp/src /opt/claude-mcp/src

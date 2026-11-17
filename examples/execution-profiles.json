@@ -1,0 +1,28 @@
+{
+  "profiles": {
+    "hackerone": {
+      "backend": "docker",
+      "container": "replace-with-existing-devcontainer-name-or-id",
+      "user": "vscode",
+      "root": "/home/vscode/app",
+      "roots": ["/home/vscode/app"],
+      "node": "/usr/local/share/nvm/current/bin/node",
+      "cli": "/home/vscode/.local/bin/claude",
+      "expected_mounts": [
+        {"type": "bind", "source": "/Users/devonly/Developer/HackerOne", "target": "/home/vscode/app"}
+      ],
+      "expected_labels": {
+        "devcontainer.local_folder": "/Users/devonly/Developer/HackerOne",
+        "com.docker.compose.service": "app"
+      },
+      "tools": [
+        {"name": "python", "command": "/usr/local/python/current/bin/python3", "args": ["--version"]},
+        {"name": "node", "command": "/usr/local/share/nvm/current/bin/node", "args": ["--version"]}
+      ],
+      "env": {
+        "PATH": "/home/vscode/app/.venv/bin:/usr/local/python/current/bin:/usr/local/share/nvm/current/bin:/home/vscode/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "LANG": "C.UTF-8"
+      }
+    }
+  }
+}

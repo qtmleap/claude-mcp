@@ -11,7 +11,7 @@ import { syncBuiltinESMExports } from 'node:module';
 const SECRET = 'private-test-token';
 const PROMPT = 'PROMPT-SHOULD-NOT-PERSIST';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const keys = ['job_id','status','created_at','updated_at','model','cwd','partial_answer','result','error'];
+const keys = ['job_id','status','created_at','updated_at','model','cwd','partial_answer','result','error','execution_context'];
 
 async function setup(t, extra = {}) {
   const base = await realpath(await mkdtemp(join(tmpdir(), 'claude-jobs-')));
@@ -307,7 +307,7 @@ test('list returns lightweight summaries; get stays full', async t => {
   await sleep(10);
   calls[0].options.onProgress({ partial_answer: 'partial text' });
   const [item] = await store.list();
-  assert.deepEqual(Object.keys(item).sort(), ['created_at','cwd','error_code','job_id','model','status','updated_at']);
+  assert.deepEqual(Object.keys(item).sort(), ['created_at','cwd','error_code','execution_context','job_id','model','status','updated_at']);
   assert.equal(item.job_id, a.job_id);
   assert.equal((await store.get(a.job_id)).partial_answer, 'partial text');
 });

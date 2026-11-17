@@ -4,6 +4,10 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { runAsk, resolveCwd, redact, RunnerError, validBudget, REVIEW_POLICY } from './runner.mjs';
 import { SessionChains } from './sessions.mjs';
+import {runExecution} from './execution.mjs';
+import {selectProfile,profilePolicy,targetCwd} from './execution-profiles.mjs';
+import {probeDocker,remoteResource} from './docker-execution.mjs';
+import {platform} from 'node:os';
 
 const MAX_WAIT_MS = 30000;
 const NO_DEADLINE_MS = 0; // Runner uses no timer when omitted/zero.
@@ -25,7 +29,7 @@ export class JobStore {
   // Unsettled executions, independent of #jobs visibility: delete/purge cannot free a slot or hide a runner from close().
   #active = new Set(); #ready; #closing;
 
-  constructor(config, { run = runAsk } = {}) {
+  constructor(config, { run = runExecution } = {}) {
     this.#config = config; this.#run = run;
     this.#dir = config.stateDir ?? join(homedir(), '.local', 'state', 'claude-mcp', 'jobs');
     this.#maxJobs = config.maxJobs ?? 128;
@@ -69,7 +73,10 @@ export class JobStore {
   }
 
   #interrupt(entry, message = 'Job interrupted by server restart; execution uncertain. Not retried.') {
-    this.#finish(entry, 'failed', { error: { code: 'interrupted', message } });
+    const remote=entry.job.execution_context?.backend==='docker';
+    const cleanup=remote?{...entry.job.execution_context.cleanup,status:'uncertain',reason:'server_interrupted'}:null;
+    if(remote){entry.job.execution_context.cleanup=cleanup;if(entry.job.execution_context.resource)entry.job.execution_context.resource.cleanup=cleanup;}
+    this.#finish(entry, 'failed', { error: { code: 'interrupted', message, ...(cleanup?{details:{cleanup}}:{}) } });
   }
 
   #finish(entry, status, fields) {
@@ -80,14 +87,14 @@ export class JobStore {
   }
 
   #snapshot({ job }) {
-    const { job_id, status, created_at, updated_at, model, cwd, partial_answer, result, error, session } = job;
-    return structuredClone({ job_id, status, created_at, updated_at, model, cwd, partial_answer, result, error, ...(session ? { session } : {}) });
+    const { job_id, status, created_at, updated_at, model, cwd, partial_answer, result, error, session, execution_context } = job;
+    return structuredClone({ job_id, status, created_at, updated_at, model, cwd, partial_answer, result, error, ...(session ? { session } : {}), ...(execution_context ? {execution_context} : {}) });
   }
 
   // Lightweight listing entry: no partial_answer/result/error bodies (each up to maxOutput); use get for those.
   #summary({ job }) {
-    const { job_id, status, created_at, updated_at, model, cwd, error } = job;
-    return { job_id, status, created_at, updated_at, model, cwd, error_code: error?.code ?? null };
+    const { job_id, status, created_at, updated_at, model, cwd, error, execution_context } = job;
+    return { job_id, status, created_at, updated_at, model, cwd, error_code: error?.code ?? null, ...(execution_context ? {execution_context} : {}) };
   }
 
   // Writes are serialized per job; queued writes coalesce and always persist the latest state.
@@ -176,12 +183,16 @@ export class JobStore {
 
   async #start(args) {
     const session = args.resumable || args.resume_job_id;
+    const profile=selectProfile(args.execution_profile,this.#config);
+    if(profile && session)throw new JobError('unsupported','Docker execution profiles are stateless; resumable/resume_job_id require the local profile');
+    const remotePolicy=profile?profilePolicy(args.execution_profile,profile,this.#config):null;
     // Session requests fingerprint the arguments as given, so a retry with changed role/budget conflicts before mismatch checks.
     const fingerprintOf = cwd => {
       const fields = [args.prompt, args.model ?? null, cwd, args.execution_timeout_ms ?? null];
       // New fields extend the fingerprint only when used, so stateless retries stay compatible with earlier snapshots.
       if (session || args.review || args.max_budget_usd !== undefined)
         fields.push(args.resumable ?? false, args.resume_job_id ?? null, args.review ?? null, args.max_budget_usd ?? null);
+      if(profile)fields.push('execution-v1',args.execution_profile,remotePolicy);
       return sha256(JSON.stringify(fields));
     };
     const keyHash = args.idempotency_key == null ? null : sha256(String(args.idempotency_key));
@@ -193,13 +204,16 @@ export class JobStore {
       return this.#snapshot(existing);
     };
     if (session) { const hit = replay(fingerprintOf(args.cwd ?? null)); if (hit) return hit; }
+    const remoteFingerprint=profile?fingerprintOf(targetCwd(args.cwd,profile)):null;
+    if(profile){const hit=replay(remoteFingerprint);if(hit)return hit;}
     const prep = session ? await this.#prepare(args) : null;
-    const cwd = prep ? prep.cwd : await resolveCwd(args.cwd, this.#config.root, this.#config.mountedRoots ?? [this.#config.root]);
+    const context=profile?await probeDocker(args.execution_profile,profile,this.#config,args.cwd):null;
+    const cwd = context?context.cwd:prep ? prep.cwd : await resolveCwd(args.cwd, this.#config.root, this.#config.mountedRoots ?? [this.#config.root]);
     const model = prep ? prep.model : args.model;
     // No await between the capacity checks and registering the job (stateless path), so concurrent starts, deletes and purges cannot interleave.
     if (this.#closing) throw new JobError('closed', 'Job store is closed');
     this.#purge();
-    const fingerprint = fingerprintOf(session ? (args.cwd ?? null) : cwd);
+    const fingerprint = remoteFingerprint ?? fingerprintOf(session ? (args.cwd ?? null) : cwd);
     if (!session) { const hit = replay(fingerprint); if (hit) return hit; }
     const capacity = () => {
       if (this.#jobs.size >= this.#maxJobs)
@@ -222,9 +236,11 @@ export class JobStore {
     const now = new Date().toISOString();
     const entry = this.#entry({ job_id: jobId, status: 'working', created_at: now, updated_at: now,
       model: model ?? null, cwd, partial_answer: '', result: null, error: null,
+      execution_context:context?{...context,resource:remoteResource(),cleanup:{status:'pending'}}:{profile:'local',backend:'local',status:'configured',platform:platform(),cwd,roots:this.#config.mountedRoots??[this.#config.root],tools:[]},
       ...(chain ? { session: { id: chain.id, cli_session_id: chain.uuid, resume_available: false } } : {}),
       idempotency: { key_hash: keyHash, fingerprint } });
     entry.chain_session = chain;
+    if(profile)entry.execution={profile,context:entry.job.execution_context};
     if (keyHash) this.#keys.set(keyHash, entry);
     entry.controller = new AbortController();
     this.#active.add(entry); // Reserved before the awaited first persistence and released only in #execute.
@@ -257,7 +273,14 @@ export class JobStore {
     const runArgs = { prompt, cwd, ...(model ? { model } : {}),
       timeout_ms: execution_timeout_ms ?? NO_DEADLINE_MS,
       ...(args.review ? { review: true } : {}), ...(args.max_budget_usd !== undefined ? { max_budget_usd: args.max_budget_usd } : {}),
-      ...(chain ? { session: { mode: chain.mode, uuid: chain.uuid, configDir: chain.configDir, previousCost: chain.previousCost } } : {}) };
+      ...(chain ? { session: { mode: chain.mode, uuid: chain.uuid, configDir: chain.configDir, previousCost: chain.previousCost } } : {}),
+      ...(entry.execution?{execution_profile:args.execution_profile,execution:entry.execution}:{}) };
+    const onExecution=patch=>{
+      entry.job.execution_context=this.#sanitize({...entry.job.execution_context,...patch});
+      if(patch.cleanup&&entry.job.error)entry.job.error.details={...entry.job.error.details,cleanup:this.#sanitize(patch.cleanup)};
+      entry.job.updated_at=new Date().toISOString();
+      if(this.#jobs.get(entry.job.job_id)===entry)this.#persist(entry).catch(()=>{});
+    };
     const onProgress = ({ partial_answer } = {}) => {
       if (entry.job.status !== 'working' || typeof partial_answer !== 'string') return;
       entry.job.partial_answer = redact(partial_answer, this.#config.env).slice(-this.#maxOutput);
@@ -274,11 +297,23 @@ export class JobStore {
     }
     let ok = false;
     try {
-      if (entry.job.status !== 'working') return; // Cancelled/interrupted during first persistence: never start the runner.
-      const result = await this.#run(runArgs, this.#config, entry.controller.signal, { onProgress, stream: true });
+      if (entry.job.status !== 'working') {
+        // No remote helper or Claude process was launched while the first write was pending.
+        if(entry.execution){
+          const cleanup={status:'not_required'};
+          entry.job.error={...entry.job.error,message:`Job ${entry.job.status==='cancelled'?'cancelled':'interrupted'} before execution started; not retried.`,details:{...entry.job.error?.details,execution_started:false}};
+          onExecution({execution_started:false,cleanup,resource:{...entry.job.execution_context.resource,cleanup}});
+        }
+        return;
+      }
+      const result = await this.#run(runArgs, this.#config, entry.controller.signal, { onProgress, onExecution, stream: true });
       if (entry.job.status === 'working') this.#finish(entry, 'completed', { result: this.#sanitize(result), error: null });
       ok = entry.job.status === 'completed';
     } catch (error) {
+      if(error?.code==='cleanup_uncertain'&&entry.job.status!=='working'){
+        entry.job.error={...(entry.job.error??{code:'cleanup_uncertain',message:'Target cleanup uncertain'}),details:this.#sanitize({...entry.job.error?.details,...error.details})};
+        if(this.#jobs.get(entry.job.job_id)===entry)await this.#persist(entry).catch(()=>{});
+      }
       if((error?.code==='permission_denied'||error?.details?.permission_denied===true) && entry.job.status!=='working'){
         entry.job.partial_answer='';
         if(this.#jobs.get(entry.job.job_id)===entry) await this.#persist(entry).catch(()=>{});

@@ -8,7 +8,7 @@ import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/st
 
 const base=process.env.CLAUDE_MCP_SMOKE_URL??'http://127.0.0.1:8877';
 const deadline=Date.now()+Number(process.env.CLAUDE_MCP_SMOKE_TIMEOUT_MS??60000);
-const TOOLS=['models','ask','start_job','get_job','list_jobs','cancel_job','delete_job'];
+const TOOLS=['models','execution_context','ask','start_job','get_job','list_jobs','cancel_job','delete_job'];
 
 let healthy=false;
 while(!healthy){

@@ -1,0 +1,22 @@
+# Opt-in override for the SAME service. Never enabled by the default compose.yaml.
+# The socket grants the service Docker-daemon authority, even read-only mounted.
+services:
+  claude-mcp:
+    environment:
+      CLAUDE_MCP_PROFILES_FILE: /etc/claude-mcp/execution-profiles.json
+      CLAUDE_MCP_DOCKER_COMMAND: /usr/local/bin/docker
+    group_add:
+      - '${CLAUDE_MCP_DOCKER_GID:?Set the daemon socket group ID for the non-root service}'
+    volumes:
+      - type: bind
+        source: ${CLAUDE_MCP_HOST_PROFILES_FILE:?Set an absolute operator-owned profiles JSON path}
+        target: /etc/claude-mcp/execution-profiles.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${CLAUDE_MCP_DOCKER_SOCKET:-/var/run/docker.sock}
+        target: /var/run/docker.sock
+        read_only: true
+        bind:
+          create_host_path: false

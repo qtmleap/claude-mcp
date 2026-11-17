@@ -19,7 +19,7 @@ async function cfg(t){
 test('HTTP initialization, tools, configured models and completed ask',async t=>{
  const config=await cfg(t);const app=await startHttp(config);t.after(()=>app.close());
  const client=new Client({name:'test',version:'1'});await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));t.after(()=>client.close());
- assert.deepEqual((await client.listTools()).tools.map(t=>t.name),['models','ask','start_job','get_job','list_jobs','cancel_job','delete_job']);
+ assert.deepEqual((await client.listTools()).tools.map(t=>t.name),['models','execution_context','ask','start_job','get_job','list_jobs','cancel_job','delete_job']);
  assert.equal((await client.callTool({name:'models',arguments:{}})).structuredContent.source,'configured');
  const answer=await client.callTool({name:'ask',arguments:{prompt:'hello',model:'custom/anything'}});
  assert.equal(answer.structuredContent.answer,'answer:hello');
@@ -29,7 +29,7 @@ test('HTTP initialization, tools, configured models and completed ask',async t=>
 test('STDIO is protocol-only and supports the same tools',async t=>{
  const config=await cfg(t);const transport=new StdioClientTransport({command:process.execPath,args:['src/main.mjs','--transport','stdio'],cwd:process.cwd(),env:{...process.env,CLAUDE_MCP_WORKSPACE:config.root,CLAUDE_MCP_JOB_DIR:join(config.root,'stdio-state'),CLAUDE_MCP_COMMAND:config.command,CLAUDE_MCP_MODELS:'sonnet',ANTHROPIC_BASE_URL:''},stderr:'pipe'});
  const client=new Client({name:'stdio-test',version:'1'});await client.connect(transport);t.after(()=>client.close());
- assert.equal((await client.listTools()).tools.length,7);
+ assert.equal((await client.listTools()).tools.length,8);
  assert.equal((await client.callTool({name:'ask',arguments:{prompt:'stdio'}})).structuredContent.answer,'answer:stdio');
 });
 test('optional MCP auth and host validation guard HTTP',async t=>{
@@ -61,9 +61,17 @@ test('SDK deadline cancels wait only; explicit cancel_job stops generation',asyn
  await assert.rejects(client.callTool({name:'ask',arguments:{prompt:'wait',wait_ms:1000}},undefined,{timeout:100}));
  const listed=(await client.callTool({name:'list_jobs',arguments:{}})).structuredContent.jobs;
  assert.equal(listed[0].status,'working');
+ const {readFile}=await import('node:fs/promises');
+ const readyBy=Date.now()+2000;let pid;
+ while(!pid){
+  pid=Number(await readFile(join(config.root,'async-pid'),'utf8').catch(()=>0));
+  assert.ok(Date.now()<readyBy,'Generation must actually start after the SDK wait expires');
+  if(!pid)await new Promise(r=>setTimeout(r,10));
+ }
+ assert.doesNotThrow(()=>process.kill(pid,0));
  const cancelled=(await client.callTool({name:'cancel_job',arguments:{job_id:listed[0].job_id}})).structuredContent;
  assert.equal(cancelled.status,'cancelled');
- const {readFile}=await import('node:fs/promises');const pid=Number(await readFile(join(config.root,'async-pid'),'utf8'));
+ assert.ok(pid,'The cancelled job had started its fixture');
  assert.throws(()=>process.kill(pid,0),e=>e.code==='ESRCH');
 });
 
@@ -72,7 +80,7 @@ test('repeated reconnects do not exhaust idle session capacity',async t=>{
  for(let i=0;i<66;i++){
   const client=new Client({name:'reconnect-test',version:'1'});
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${app.port}/mcp`)));
-  assert.equal((await client.listTools()).tools.length,7);await client.close();
+  assert.equal((await client.listTools()).tools.length,8);await client.close();
  }
 });
 
