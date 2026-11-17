@@ -5,17 +5,15 @@ export class RunnerError extends Error {
 		if (details) this.details = details;
 	}
 }
+export function secretValues(env = process.env) {
+ const values=['ANTHROPIC_AUTH_TOKEN','ANTHROPIC_API_KEY','CF_ACCESS_CLIENT_SECRET','CF_ACCESS_CLIENT_ID'].map(k=>env[k]).filter(Boolean);
+ for(const line of (env.ANTHROPIC_CUSTOM_HEADERS??'').split('\n')){
+  const i=line.indexOf(':');if(i<1)continue;const v=line.slice(i+1).trim();if(v){values.push(v);const bearer=/^Bearer\s+(.+)$/i.exec(v);if(bearer)values.push(bearer[1]);}
+ }
+ return [...new Set(values)].sort((a,b)=>b.length-a.length);
+}
 export function redact(text, env = process.env) {
-	let value = String(text);
-	for (const key of [
-		"ANTHROPIC_AUTH_TOKEN",
-		"ANTHROPIC_API_KEY",
-		"CF_ACCESS_CLIENT_SECRET",
-		"CF_ACCESS_CLIENT_ID",
-	]) {
-		if (env[key]) value = value.split(env[key]).join("[redacted]");
-	}
-	return value;
+ let value=String(text);for(const secret of secretValues(env))value=value.split(secret).join('[redacted]');return value;
 }
 export function childEnvironment(env) {
 	const result = {

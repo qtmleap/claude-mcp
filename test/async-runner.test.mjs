@@ -36,3 +36,10 @@ test('stderr redaction compression cannot expose a truncated repeated secret pre
   assert.equal(error.code,'claude_exit');assert.ok(!error.message.includes('reviewSecret'),error.message);return true;
  });
 });
+
+test('custom-header credentials are redacted across split streaming deltas and terminal stderr',async t=>{
+ const config=await fixture(t,`console.log(JSON.stringify({type:'stream_event',event:{delta:{type:'text_delta',text:'custom-' }}}));console.log(JSON.stringify({type:'stream_event',event:{delta:{type:'text_delta',text:'private-value'}}}));console.log(JSON.stringify({type:'result',subtype:'success',is_error:false,result:'custom-private-value'}));`);
+ config.env.ANTHROPIC_CUSTOM_HEADERS='X-Private: custom-private-value';
+ const progress=[];const result=await runAsk({prompt:'x'},config,undefined,{stream:true,onProgress:p=>progress.push(p)});
+ assert.equal(result.answer,'[redacted]');assert.ok(!JSON.stringify(progress).includes('custom-private-value'));
+});

@@ -1,4 +1,5 @@
 import { homedir } from 'node:os';
+import {loadProfiles} from './execution-profiles.mjs';
 import { resolve, dirname, join } from 'node:path';
 function integer(env,key,fallback,min,max) {
   const n=Number(env[key]??fallback);
@@ -10,6 +11,7 @@ export function loadConfig(env=process.env) {
   const permissionMode=env.CLAUDE_MCP_PERMISSION_MODE||'acceptEdits';
   if(!['manual','default','acceptEdits','dontAsk','plan','auto','bypassPermissions'].includes(permissionMode)) throw new Error('Invalid CLAUDE_MCP_PERMISSION_MODE');
   return {env:{...env},root,command:env.CLAUDE_MCP_COMMAND||'claude',
+    executionProfiles:loadProfiles(env.CLAUDE_MCP_PROFILES_FILE),dockerCommand:env.CLAUDE_MCP_DOCKER_COMMAND||'docker',
     mountedRoots:(env.CLAUDE_MCP_MOUNTED_ROOTS||root).split(',').map(p=>resolve(p.trim())),
     timeoutMs:undefined,
     streamDiagnostics:integer(env,'CLAUDE_MCP_STREAM_DIAGNOSTICS',0,0,1)===1,

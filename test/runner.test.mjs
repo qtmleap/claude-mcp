@@ -69,10 +69,16 @@ test('invalid JSON, output limit and nonzero exit fail',async t=>{
 });
 test('timeout and cancellation terminate process groups, do not retry',async t=>{
   const {root,config}=await fixture(t,`const fs=require('fs');fs.appendFileSync('runs','x');setInterval(()=>{},1000);`);
-  await assert.rejects(runAsk({prompt:'test',timeout_ms:80},config),e=>e.code==='timeout');
+  await assert.rejects(runAsk({prompt:'test',timeout_ms:1000},config),e=>e.code==='timeout');
   assert.equal(await readFile(join(root,'runs'),'utf8'),'x');
-  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),80);
-  await assert.rejects(runAsk({prompt:'test'},config,controller.signal),e=>e.code==='cancelled');clearTimeout(timer);
+  const controller=new AbortController();t.after(()=>controller.abort());
+  const running=runAsk({prompt:'test'},config,controller.signal);running.catch(()=>{});
+  const readyBy=Date.now()+2000;
+  while((await readFile(join(root,'runs'),'utf8'))!=='xx'){
+    assert.ok(Date.now()<readyBy,'Second fixture must be running before cancellation');
+    await new Promise(r=>setTimeout(r,10));
+  }
+  controller.abort();await assert.rejects(running,e=>e.code==='cancelled');
   assert.equal(await readFile(join(root,'runs'),'utf8'),'xx');
 });
 test('gateway environment supports bearer, API key and Cloudflare headers',()=>{
