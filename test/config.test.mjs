@@ -8,3 +8,10 @@ test('native default workspace follows the process working directory',()=>{
 test('explicit workspace remains configurable independently of platform',()=>{
  const config=loadConfig({CLAUDE_MCP_WORKSPACE:'project'});assert.equal(config.root,resolve('project'));
 });
+test('session idle TTL and max sessions have defaults and validated ranges',()=>{
+ const config=loadConfig({});assert.equal(config.sessionIdleMs,300000);assert.equal(config.maxSessions,64);
+ const custom=loadConfig({CLAUDE_MCP_SESSION_IDLE_MS:'1000',CLAUDE_MCP_MAX_SESSIONS:'1024'});
+ assert.equal(custom.sessionIdleMs,1000);assert.equal(custom.maxSessions,1024);
+ for(const env of [{CLAUDE_MCP_SESSION_IDLE_MS:'999'},{CLAUDE_MCP_SESSION_IDLE_MS:'86400001'},{CLAUDE_MCP_MAX_SESSIONS:'0'},{CLAUDE_MCP_MAX_SESSIONS:'1025'}])
+  assert.throws(()=>loadConfig(env),/Invalid CLAUDE_MCP_(SESSION_IDLE_MS|MAX_SESSIONS)/);
+});

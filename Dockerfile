@@ -16,7 +16,7 @@ RUN --mount=type=bind,source=package.json,target=package.json,readonly \
     npm ci --omit=dev --no-audit --no-fund
 COPY package.json ./
 COPY src ./src
-RUN mkdir -p /runtime/workspace /runtime/home/node && chown -R 1000:1000 /runtime
+RUN mkdir -p /runtime/workspace /runtime/home/node /runtime/state/jobs && chown -R 1000:1000 /runtime
 # Keep Claude command-line tools, without the package manager.
 # Debian 13 merges /bin and /lib into /usr; normalize the copied tree.
 RUN mkdir -p /tools/usr/bin /tools/usr/lib /tools/usr/share \
@@ -40,11 +40,12 @@ COPY --from=builder /usr/bin/tini /usr/bin/tini
 COPY --link --from=builder --chown=1000:1000 /opt/claude-mcp/node_modules /opt/claude-mcp/node_modules
 COPY --link --from=builder --chown=1000:1000 /opt/claude-mcp/package.json /opt/claude-mcp/package.json
 COPY --link --from=builder --chown=1000:1000 /opt/claude-mcp/src /opt/claude-mcp/src
+COPY --link --from=builder --chown=1000:1000 /runtime/state /var/lib/claude-mcp
 COPY --link --from=builder --chown=1000:1000 /runtime/workspace /workspace
 COPY --link --from=builder --chown=1000:1000 /runtime/home/node /home/node
 USER 1000:1000
 WORKDIR /opt/claude-mcp
-ENV PATH=/usr/local/bin:/nodejs/bin:/usr/bin:/bin HOME=/home/node HOST=0.0.0.0 PORT=8877 CLAUDE_MCP_WORKSPACE=/workspace
+ENV PATH=/usr/local/bin:/nodejs/bin:/usr/bin:/bin HOME=/home/node HOST=0.0.0.0 PORT=8877 CLAUDE_MCP_WORKSPACE=/workspace CLAUDE_MCP_JOB_DIR=/var/lib/claude-mcp/jobs
 EXPOSE 8877
 ENTRYPOINT ["/usr/bin/tini", "-s", "--", "/nodejs/bin/node", "src/main.mjs"]
 CMD ["--transport", "http"]
