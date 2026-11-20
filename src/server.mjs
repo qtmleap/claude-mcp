@@ -34,9 +34,9 @@ export function createMcp(config, lifecycleSignal, requestSignals, sharedJobs) {
   wait_ms:z.number().int().min(0).max(30000).optional(),timeout_ms:z.number().int().min(0).max(1800000).describe('Deprecated wait alias (clamped to 30s); never terminates generation. Use execution_timeout_ms for a deadline.').optional(),
   execution_timeout_ms:z.number().int().min(50).max(2147483647).describe('Explicit opt-in execution deadline; omission permits unlimited generation time.').optional(),
   idempotency_key:z.string().min(1).max(128).optional(),
-  resumable:z.boolean().describe('Start a resumable conversation (requires explicit model and review:true). Default false: stateless, nothing persisted. Resumable transcripts retain the prompts/answers in the server state volume.').optional(),
+  resumable:z.boolean().describe('Start a resumable conversation (requires explicit model and review:true or review:false). Default false: stateless, nothing persisted. Resumable transcripts retain prompts/answers in the server state volume; isolated CLI config may omit user-level hooks/plugins/settings. review:false allows configured write tools.').optional(),
   resume_job_id:z.string().regex(/^job_[A-Za-z0-9_-]{1,64}$/).describe('Continue from this job, which must be the current successful head of a resumable conversation. Model, cwd and review are inherited (mismatches rejected). Mutually exclusive with resumable. A failed/cancelled/interrupted turn blocks the conversation: start a new chain.').optional(),
-  review:z.boolean().describe('Read-only review profile enforced at launch: --bare, tools Read/Grep/Glob only, no MCP/hooks/plugins, configured roots added for reading. Recommended with resumable.').optional(),
+  review:z.boolean().describe('Read-only review profile enforced at launch: --bare, tools Read/Grep/Glob only, no MCP/hooks/plugins, configured roots added for reading. For a new resumable chain choose true for read-only review or false to allow the configured implementation tools.').optional(),
   max_budget_usd:z.number().positive().max(100).describe('Per-invocation spend cap passed to the CLI (finite, >0, <=100).').optional()
  };
  const annotations={readOnlyHint:false,destructiveHint:true,idempotentHint:false,openWorldHint:true};
