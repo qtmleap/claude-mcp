@@ -50,13 +50,34 @@ async function turn(store, f, args) {
 test('new resumable validates arguments before any execution', async t => {
   const { config } = await setup(t); const { run, calls } = fake(); const store = await open(t, config, run);
   assert.equal(await code(store, { ...base, model: undefined }), 'model_required');
-  assert.equal(await code(store, { ...base, review: false }), 'unsupported');
   assert.equal(await code(store, { prompt: 'q', model: 'm1', resumable: true }), 'unsupported');
   assert.equal(await code(store, { ...base, resume_job_id: 'job_abc' }), 'invalid_request');
   assert.equal(await code(store, { prompt: 'q', resume_job_id: 'job_abc', resumable: true }), 'invalid_request');
   for (const max_budget_usd of [0, -1, 100.5, NaN, Infinity, '5']) assert.equal(await code(store, { prompt: 'q', max_budget_usd }), 'invalid_request', String(max_budget_usd));
   assert.equal(await code(store, { prompt: 'q', resume_job_id: 'job_unknown' }), 'not_found');
   assert.equal(calls.length, 0);
+});
+
+test('explicit implementation chain inherits role, pins policy, and blocks after failure', async t => {
+  const { config } = await setup(t); const f = fake({ hold: true }); const store = await open(t, config, f.run);
+  const first = await turn(store, f, { ...base, review: false });
+  assert.equal(f.calls[0].args.review, false);
+  assert.equal(await code(store, { prompt: 'n', resume_job_id: first.job_id, review: true }), 'session_mismatch');
+  const next = await store.start({ prompt: 'n', resume_job_id: first.job_id });
+  for (let i = 0; i < 100 && !f.calls[1]?.fail; i++) await sleep(5);
+  assert.equal(f.calls[1].args.review, false);
+  f.calls[1].fail(new RunnerError('claude_error', 'failed'));
+  assert.equal((await done(store, next.job_id)).status, 'failed');
+  assert.equal(await code(store, { prompt: 'n', resume_job_id: next.job_id }), 'chain_blocked');
+  assert.equal(await code(store, { prompt: 'n', resume_job_id: first.job_id }), 'stale_ancestor');
+});
+
+test('implementation continuation rejects changed permission policy before launch', async t => {
+  const { config } = await setup(t); const f = fake(); const store = await open(t, config, f.run);
+  const first = await store.start({ ...base, review: false }); await done(store, first.job_id);
+  config.permissionMode = 'different';
+  assert.equal(await code(store, { prompt: 'n', resume_job_id: first.job_id }), 'session_mismatch');
+  assert.equal(f.calls.length, 1);
 });
 
 test('new chain: server uuid, private files, review/budget forwarded, resume_available tracks head, no prompt persisted', async t => {

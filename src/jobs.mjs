@@ -165,8 +165,8 @@ export class JobStore {
     const policy = review => sha256(JSON.stringify([!!review, review ? REVIEW_POLICY : [this.#config.permissionMode, this.#config.allowedTools ?? []]]));
     if (args.resumable) {
       if (!args.model) throw new JobError('model_required', 'A new resumable conversation needs an explicit model');
-      if (args.review !== true) throw new JobError('unsupported', 'resumable currently requires review:true (isolated CLI config would otherwise drop hooks/plugins)');
-      return { cwd: await resolveCwd(args.cwd, this.#config.root, this.#config.mountedRoots ?? [this.#config.root]), model: args.model, review: true, policy: policy(true) };
+      if (args.review !== true && args.review !== false) throw new JobError('unsupported', 'resumable requires an explicit review:true or review:false; implementation sessions use an isolated CLI config');
+      return { cwd: await resolveCwd(args.cwd, this.#config.root, this.#config.mountedRoots ?? [this.#config.root]), model: args.model, review: args.review, policy: policy(args.review) };
     }
     const parent = this.#jobs.get(args.resume_job_id);
     if (parent && !parent.job.session) throw new JobError('invalid_request', 'resume_job_id does not name a resumable job');
@@ -272,7 +272,7 @@ export class JobStore {
     const chain = entry.chain_session;
     const runArgs = { prompt, cwd, ...(model ? { model } : {}),
       timeout_ms: execution_timeout_ms ?? NO_DEADLINE_MS,
-      ...(args.review ? { review: true } : {}), ...(args.max_budget_usd !== undefined ? { max_budget_usd: args.max_budget_usd } : {}),
+      ...(args.review || chain ? { review: !!args.review } : {}), ...(args.max_budget_usd !== undefined ? { max_budget_usd: args.max_budget_usd } : {}),
       ...(chain ? { session: { mode: chain.mode, uuid: chain.uuid, configDir: chain.configDir, previousCost: chain.previousCost } } : {}),
       ...(entry.execution?{execution_profile:args.execution_profile,execution:entry.execution}:{}) };
     const onExecution=patch=>{

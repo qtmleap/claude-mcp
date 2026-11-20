@@ -47,6 +47,16 @@ test('resumable review ask returns job_id and session; continuation works end to
   assert.equal(stale.isError, true); assert.equal(stale.structuredContent.error.code, 'stale_ancestor');
 });
 
+test('explicit implementation session continues over MCP and rejects a role change', async t => {
+  const c = await boot(t);
+  const first = (await call(c, 'ask', { prompt: 'one', model: 'm1', resumable: true, review: false })).structuredContent;
+  assert.equal(first.answer, 'a:one'); assert.equal(first.session.resume_available, true);
+  const mismatch = await call(c, 'ask', { prompt: 'two', resume_job_id: first.job_id, review: true });
+  assert.equal(mismatch.structuredContent.error.code, 'session_mismatch');
+  const next = (await call(c, 'ask', { prompt: 'two', resume_job_id: first.job_id })).structuredContent;
+  assert.equal(next.answer, 'a:two'); assert.equal(next.session.cli_session_id, first.session.cli_session_id);
+});
+
 test('invalid session arguments surface as tool errors', async t => {
   const c = await boot(t);
   const r = await call(c, 'start_job', { prompt: 'x', resumable: true });
